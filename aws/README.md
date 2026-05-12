@@ -118,6 +118,12 @@ graph). To target one layer, `cd` into it (e.g. `cd networking/`) and run `terra
 
 ## Deploying app code
 
+> Most of the time you don't run these by hand. After the one-time setup, the GitHub Actions
+> workflow at [.github/workflows/deploy-stage.yml](../.github/workflows/deploy-stage.yml) does
+> all of this on every push to `main`. See [DOCUMENTATION.md § 13 "CI/CD with GitHub Actions"](DOCUMENTATION.md#13-cicd-with-github-actions)
+> for setup + rollback. The manual steps below are for the very first deploy (before CI exists)
+> or emergencies.
+
 1. Authenticate Docker against the new ECR repo:
    ```bash
    aws ecr get-login-password --region ap-southeast-1 --profile reservation-stage \

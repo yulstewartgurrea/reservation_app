@@ -11,5 +11,5 @@ inputs = {
   frontend_cloudfront_alias = try(local.region_vars.frontend_cloudfront_alias, [])
   frontend_price_class      = try(local.region_vars.frontend_price_class, "PriceClass_100")
   github_repo               = local.region_vars.github_repo
-  github_deploy_refs        = local.region_vars.github_deploy_refs
+  github_environments       = local.region_vars.github_environments
 }

@@ -38,7 +38,10 @@ locals {
   }
 
   base_image_name = "${local.project_name}/${local.env}/api"
-  container_image = "${local.account_id}.dkr.ecr.${local.aws_region}.amazonaws.com/${local.base_image_name}:latest"
+  # CI sets API_IMAGE_TAG to the short commit SHA on every deploy. Local applies fall back to
+  # `:latest` (which the first apply uses to bootstrap before CI is wired up).
+  api_image_tag   = get_env("API_IMAGE_TAG", "latest")
+  container_image = "${local.account_id}.dkr.ecr.${local.aws_region}.amazonaws.com/${local.base_image_name}:${local.api_image_tag}"
 
   # Common ECS task IAM policies — read app secrets/params from /reservation/* in this account.
   tasks_iam_role_statements = [
@@ -275,8 +278,9 @@ locals {
 
   # GitHub repo allowed to assume the deploy role via OIDC.
   github_repo = "yulstewartgurrea/reservation_app"
-  # Branches that may deploy to this env (sub claim filter on the OIDC token).
-  github_deploy_refs = ["refs/heads/staging"]
+  # GitHub Environments allowed to deploy here. The workflow sets `environment: staging`,
+  # so the OIDC token's sub claim becomes `repo:OWNER/REPO:environment:staging` — we match on that.
+  github_environments = ["staging"]
 
   # ---------------------------------------------------------------------------
   # Parameters & secrets (read from parameters/env.yaml)

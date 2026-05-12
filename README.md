@@ -483,7 +483,7 @@ The frontend is a Next.js **static export** (`output: "export"` in [frontend/nex
 Key properties:
 
 - **S3 buckets are private.** Only CloudFront can read them (via Origin Access Control). No public-access ACL bullshit.
-- **No long-lived AWS keys in GitHub.** GH Actions assumes an IAM role via OIDC. The role's trust policy is locked to this repo + the specific branch (staging role only trusts `refs/heads/staging`; prod only `refs/heads/main`).
+- **No long-lived AWS keys in GitHub.** GH Actions assumes an IAM role via OIDC. The trust policy is locked to this repo + the **GitHub Environment** the job declares (staging role only trusts `environment:staging`; prod only `environment:prod`). This means a job *must* use `environment: staging` (or `prod`) in its YAML to assume the role — branch protections on the GitHub Environment then gate prod deploys.
 - **Cache strategy:** `/_next/*` is fingerprinted (hashes in filename) → 1-year immutable cache. HTML and root assets → 60s cache + `must-revalidate`. Every deploy invalidates `/*` so HTML reloads quickly.
 - **SPA fallback:** CloudFront rewrites 403/404 → `/index.html` so hard refreshes on dynamic routes work.
 
@@ -676,11 +676,19 @@ Expected monthly: **$0** for the first few thousand users. The biggest risk is i
 
 ### Troubleshooting
 
-**Workflow fails on "configure-aws-credentials" with `Error: Could not assume role`**
-The OIDC trust policy didn't match. Common causes:
-- Pushing from a branch other than `staging` or `main`.
-- Repo name in [region.hcl](aws/accounts/stage/ap-southeast-1/region.hcl) `github_repo` doesn't match the actual repo (case-sensitive).
-- The IAM role's `assume_role_policy` is stale — `terragrunt apply` the layer.
+**Workflow fails on "configure-aws-credentials" with `Error: Not authorized to perform sts:AssumeRoleWithWebIdentity`**
+The OIDC trust policy's `sub` claim filter didn't match the token GitHub presented. Common causes:
+- The job is missing `environment: staging` (or `prod`) in its YAML. Without `environment:`, the token's `sub` claim is `repo:OWNER/REPO:ref:refs/heads/<branch>` — but our trust policy only accepts `repo:OWNER/REPO:environment:<env>`. Add the `environment:` key to the job.
+- The GitHub Environment name doesn't match what's in `github_environments` in [region.hcl](aws/accounts/stage/ap-southeast-1/region.hcl) (case-sensitive).
+- Repo name in `github_repo` doesn't match the actual repo (also case-sensitive — GitHub URLs are technically case-insensitive but the OIDC token uses the canonical casing).
+- The IAM role's trust policy is stale after a Terragrunt change — re-run `terragrunt apply` on the layer.
+
+To debug, decode the token claim from a workflow log: enable `ACTIONS_RUNNER_DEBUG=true` and look for "sub:" in the trace, or compare to the trust policy with:
+```bash
+aws iam get-role --role-name iam-role-reservation-stage-frontend-deploy \
+  --profile reservation-stage \
+  --query 'Role.AssumeRolePolicyDocument.Statement[0].Condition.StringLike'
+```
 
 **Site loads but API calls return 404 / CORS errors**
 `NEXT_PUBLIC_API_URL` is empty or wrong. Update the GitHub Environment variable, push an empty commit to retrigger build.

@@ -19,6 +19,7 @@ locals {
 
   # GitHub repo allowed to assume the deploy role via OIDC.
   github_repo = "yulstewartgurrea/reservation_app"
-  # Branches that may deploy to this env (sub claim filter on the OIDC token).
-  github_deploy_refs = ["refs/heads/main"]
+  # GitHub Environments allowed to deploy here. The workflow sets `environment: prod`,
+  # so the OIDC token's sub claim becomes `repo:OWNER/REPO:environment:prod` — we match on that.
+  github_environments = ["prod"]
 }

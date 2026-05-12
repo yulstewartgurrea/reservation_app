@@ -145,7 +145,7 @@ resource "aws_iam_openid_connect_provider" "github" {
 locals {
   oidc_provider_arn = var.github_oidc_provider_arn != "" ? var.github_oidc_provider_arn : aws_iam_openid_connect_provider.github[0].arn
   github_subs = [
-    for ref in var.github_deploy_refs : "repo:${var.github_repo}:ref:${ref}"
+    for env in var.github_environments : "repo:${var.github_repo}:environment:${env}"
   ]
 }
 

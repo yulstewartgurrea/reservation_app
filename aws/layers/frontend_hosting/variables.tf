@@ -27,8 +27,8 @@ variable "github_repo" {
   type        = string
 }
 
-variable "github_deploy_refs" {
-  description = "Branches/tags allowed to deploy. e.g. [\"refs/heads/develop\"], [\"refs/heads/main\"], or [\"refs/tags/v*\"]."
+variable "github_environments" {
+  description = "GitHub Environment names allowed to assume this role. e.g. [\"staging\"] or [\"prod\"]. When a workflow job runs with `environment: X`, GitHub's OIDC token's `sub` claim is `repo:OWNER/REPO:environment:X` — we match on that, NOT on branch refs."
   type        = list(string)
   default     = []
 }

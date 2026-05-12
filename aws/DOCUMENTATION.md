@@ -22,6 +22,7 @@ explains how the stack is built, why it's structured the way it is, and how to o
 10. [Cost breakdown](#10-cost-breakdown)
 11. [Troubleshooting](#11-troubleshooting)
 12. [Extending the stack](#12-extending-the-stack)
+13. [CI/CD with GitHub Actions](#13-cicd-with-github-actions)
 
 ---
 
@@ -338,7 +339,7 @@ Hosts the Next.js static export. The bucket is **not** publicly readable; CloudF
 
 **OIDC provider quirk** — AWS allows only one OIDC provider per (account, issuer). The `stage` env creates it; `prod` reuses it by passing the ARN in [aws/accounts/prod/ap-southeast-1/frontend_hosting/terragrunt.hcl](../aws/accounts/prod/ap-southeast-1/frontend_hosting/terragrunt.hcl) `inputs.github_oidc_provider_arn`. Apply stage first, copy the output, then apply prod.
 
-**Deploy role trust** is scoped tight: only `repo:yulstewartgurrea/reservation_app:ref:<allowed-branch>` can assume it. Stage allows `staging`; prod allows `main`. Edit `github_deploy_refs` in each env's `region.hcl` to change.
+**Deploy role trust** is scoped to the **GitHub Environment**, not the branch: only `repo:yulstewartgurrea/reservation_app:environment:<env>` can assume it. Stage allows `environment:staging`; prod allows `environment:prod`. Workflow jobs must therefore declare `environment: staging` (or `prod`) in YAML — without it, the OIDC token's `sub` claim is `ref:refs/heads/<branch>` instead and the assume fails. Edit `github_environments` in each env's `region.hcl` to change.
 
 **Outputs to wire into GitHub Environments** (Settings → Environments → staging / prod, add as **variables**):
 
@@ -813,3 +814,152 @@ For reproducible deploys + easy rollback:
    }
    ```
 6. Apply ecs + parameters layers.
+
+---
+
+## 13. CI/CD with GitHub Actions
+
+Push to `main` → tests run → image is built and pushed to ECR with a SHA tag → migrations run as
+a one-shot ECS task → ECS services roll over to the new image. Auth is via **GitHub OIDC** — no
+long-lived AWS access keys live in the repo.
+
+### Pipeline shape
+
+```
+push to main (touching backend/ or aws/)
+     │
+     ▼
+┌────────────┐    ┌─────────────────┐    ┌───────────────────┐    ┌──────────────────────┐
+│  test      │──▶│  build & push   │──▶│  migrate          │──▶│  deploy              │
+│            │   │                 │   │                   │   │                       │
+│ Postgres + │   │ docker build →  │   │ register one-off  │   │ TF_VAR-style override │
+│ Redis svc  │   │ ECR push (SHA + │   │ task def from     │   │ API_IMAGE_TAG=<sha>   │
+│ containers │   │ latest tags)    │   │ API template,     │   │ → terragrunt apply    │
+│ → manage.py│   │                 │   │ run as Fargate    │   │   on ecs layer        │
+│   test     │   │                 │   │ task, wait for    │   │ → wait for services-  │
+│            │   │                 │   │ exit code 0       │   │   stable              │
+└────────────┘    └─────────────────┘    └───────────────────┘    └──────────────────────┘
+
+  test job: any failure aborts everything downstream.
+  build:    when redeploying (workflow_dispatch with image_tag), this step verifies the existing
+            image rather than rebuilding.
+  migrate:  if exit code != 0, the deploy job is skipped and old tasks keep serving.
+  deploy:   image tag drives a new task definition revision; ECS does a rolling deploy.
+```
+
+### Files
+
+| File | What it is |
+|---|---|
+| [`.github/workflows/deploy-stage.yml`](../.github/workflows/deploy-stage.yml) | The pipeline definition |
+| [`.github/workflows/README.md`](../.github/workflows/README.md) | Workflow setup + rollback notes |
+| [`aws/layers/ci/`](layers/ci/) | Terraform: GitHub OIDC provider + deployer IAM role |
+| [`aws/accounts/stage/ap-southeast-1/ci/terragrunt.hcl`](accounts/stage/ap-southeast-1/ci/terragrunt.hcl) | Stage stub for the CI layer |
+
+### One-time setup
+
+1. **Apply the `ci` layer once** (locally, with admin creds), so the OIDC provider + deployer role exist:
+   ```bash
+   cd aws/accounts/stage/ap-southeast-1/ci
+   terragrunt apply
+   ```
+
+2. **Grab the role ARN:**
+   ```bash
+   terragrunt output -raw deployer_role_arn
+   # → arn:aws:iam::<account>:role/role-github-actions-reservation-stage-deployer
+   ```
+
+3. **In GitHub:**
+   - Settings → Environments → **New environment** → name it `staging`
+     (Optional: add yourself as a required reviewer for click-to-deploy gates.)
+   - Settings → Secrets and variables → Actions → **Variables** tab → New repository variable:
+     - Name: `AWS_DEPLOY_ROLE_ARN`
+     - Value: the ARN from step 2
+
+4. **Push to `main`.** The workflow fires; first deploy takes ~6-8 min.
+
+### Trust policy — what the role accepts
+
+The OIDC trust policy (in [layers/ci/main.tf](layers/ci/main.tf)) allows the role to be assumed
+**only** when these claims are present on the GitHub token:
+
+- `aud == sts.amazonaws.com` — standard for AWS OIDC
+- `sub LIKE repo:<github_repo>:environment:<env>` — for any `<env>` in `github_environments`
+
+Since the workflow declares `environment: staging`, the sub claim is
+`repo:yulstewartgurrea/reservation_app:environment:staging`. Any push from another repo, branch,
+or environment is rejected at the STS layer.
+
+### Permissions of the deployer role
+
+| Grant | Source | Why |
+|---|---|---|
+| Read everything in the account | AWS-managed `ReadOnlyAccess` | `terragrunt apply` refreshes state on every resource type. Read-only is broad but reversible. |
+| Push to ECR | AWS-managed `AmazonEC2ContainerRegistryPowerUser` | `docker push`, plus pulling layers during build. |
+| ECS create/update/run-task | AWS-managed `AmazonECS_FullAccess` | Register task defs, update services, run one-off migrate tasks. |
+| `iam:PassRole` on ECS task roles | inline policy in [`main.tf`](layers/ci/main.tf) | Required to register a task def that references task roles. Scoped to the exact role names from `ecs_services`. |
+| `s3:*Object` on `ecs/*` state key | inline policy | Terraform state for the ecs layer only. |
+| `logs:CreateLogGroup` on `/ecs/*` | inline policy | New task def revisions reference log groups. |
+
+**Notably absent** — write access to RDS, VPC, IAM (beyond task roles), S3 (beyond state), or any
+other layer's resources. If a malicious push tried `terragrunt apply` on the `rds` layer, it would
+fail at the AWS API level.
+
+### Day-2 ops with CI in place
+
+#### Normal deploy
+
+Merge a PR to `main`. Done.
+
+#### Redeploy / rollback
+
+GitHub UI → Actions → **Deploy stage** → Run workflow → enter a previous short SHA (e.g. `a1b2c3d4e5f6`) in the **image_tag** input. The build step skips (just verifies the tag exists in ECR), migrations run again, ECS rolls over.
+
+⚠️ Rolling back across schema migrations is not safe out of the box. If the rollback target's code can't read the current schema, you need to manually revert the migration first (`python manage.py migrate <app> <previous_migration>`) using an ECS exec or a one-off task.
+
+#### Skip the pipeline for an emergency manual fix
+
+If GitHub is down or you need to deploy faster than CI, you can repeat the steps locally:
+
+```bash
+ACCT=$(aws sts get-caller-identity --query Account --output text)
+SHA=$(git rev-parse --short=12 HEAD)
+aws ecr get-login-password --region ap-southeast-1 \
+  | docker login --username AWS --password-stdin $ACCT.dkr.ecr.ap-southeast-1.amazonaws.com
+docker build -t reservation-api:$SHA ./backend
+docker tag reservation-api:$SHA $ACCT.dkr.ecr.ap-southeast-1.amazonaws.com/reservation/stage/api:$SHA
+docker push $ACCT.dkr.ecr.ap-southeast-1.amazonaws.com/reservation/stage/api:$SHA
+
+cd aws/accounts/stage/ap-southeast-1/ecs
+API_IMAGE_TAG=$SHA terragrunt apply
+```
+
+### Why this design
+
+- **SHA tags, not `:latest`** — reproducible deploys, trivial rollback, no "what's actually running?" question.
+- **Migrations as a one-off task, not in the API entrypoint** (well, *also* in the entrypoint as a safety net) — a bad migration aborts the deploy instead of looping crashed tasks.
+- **Terraform-managed task definition** — `API_IMAGE_TAG` env → Terragrunt → new task def revision. Image version is part of state; no drift between IaC and reality.
+- **OIDC over access keys** — short-lived credentials, revocable per-repo, no rotation overhead.
+- **`AmazonECS_FullAccess` is broader than ideal** — for prod, swap this for a custom policy scoped to the specific cluster ARN. Acceptable for stage.
+
+### CI/CD troubleshooting
+
+**`Error: Could not assume role with OIDC`**
+- The `AWS_DEPLOY_ROLE_ARN` variable is missing, has a typo, or points to the wrong account.
+- The workflow run isn't targeting the `staging` environment — check the job's `environment:` key.
+- The OIDC provider doesn't exist in the account — re-apply the `ci` layer.
+
+**`AccessDenied` from `aws ecs register-task-definition`**
+- Usually `iam:PassRole`. Check that the task role name (e.g. `role-svc-ecs-reservation-stage-api-task`) is in the `task_role_names` input of the ci layer. The ecs layer outputs the names; the ci layer reads them.
+
+**Migration task starts but fails with `Could not connect to database`**
+- The task is using the API service's network config (private subnets + SGs). Check that the API service can reach the DB — if it can, so can the migrate task. If not, networking issue.
+
+**Pipeline succeeds but new code isn't live**
+- ECS rolling deploy can take 2-3 min after `services-stable` is signaled. Check task definition revision: `aws ecs describe-services --cluster ecs-reservation-stage --services svc-ecs-reservation-stage-api --query 'services[0].taskDefinition'` — should match the deploy step's output.
+- If the task definition is right but tasks are still old, check the deployment circuit breaker isn't aborting due to health-check failures.
+
+**Tests pass locally but fail in CI**
+- CI runs against fresh Postgres/Redis service containers — no shared state. If tests depend on data, they're not isolated. Common offender: `Reservation` tests that depend on seeded categories. The CI test job doesn't run `seed_categories`; fix the tests to seed their own fixtures.
+
