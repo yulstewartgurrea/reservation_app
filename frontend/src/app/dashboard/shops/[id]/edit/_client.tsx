@@ -1,0 +1,707 @@
+"use client";
+
+import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
+import Link from "next/link";
+import { useParams, useRouter } from "next/navigation";
+import {
+  ArrowLeft,
+  BarChart3,
+  Building2,
+  CalendarClock,
+  ChevronDown,
+  ChevronUp,
+  Clock,
+  Image as ImageIcon,
+  ImagePlus,
+  MapPin,
+  Phone,
+  Sliders,
+  Store,
+  Trash2,
+  Users,
+} from "lucide-react";
+import { api } from "@/lib/api";
+import { formatApiError } from "@/lib/errors";
+import { FormField as Field, FormSection as Section } from "@/components/FormSection";
+import { SidebarCard } from "@/components/SidebarCard";
+import { Toast, ToastMessage } from "@/components/Toast";
+
+type FormValues = {
+  name: string;
+  description: string;
+  address_line: string;
+  city: string;
+  postal_code: string;
+  country: string;
+  phone: string;
+  email: string;
+  latitude: string;
+  longitude: string;
+  cancellation_window_hours: string;
+};
+
+type Shop = FormValues & {
+  id: number;
+  status: "active" | "paused" | "pending";
+  photos: { id: number; image: string; caption: string }[];
+};
+
+type StagedPhoto = { id: string; file: File; preview: string };
+
+const DESCRIPTION_MAX = 500;
+const MAX_PHOTOS = 8;
+
+const COUNTRIES = [
+  "Philippines",
+  "United States",
+  "United Kingdom",
+  "Singapore",
+  "Japan",
+  "Australia",
+  "Canada",
+  "Hong Kong",
+  "Malaysia",
+  "Indonesia",
+  "Thailand",
+  "Vietnam",
+];
+
+function toFormValues(d: Partial<Shop>): FormValues {
+  return {
+    name: d.name ?? "",
+    description: d.description ?? "",
+    address_line: d.address_line ?? "",
+    city: d.city ?? "",
+    postal_code: d.postal_code ?? "",
+    country: d.country ?? "",
+    phone: d.phone ?? "",
+    email: d.email ?? "",
+    latitude: d.latitude?.toString() ?? "",
+    longitude: d.longitude?.toString() ?? "",
+    cancellation_window_hours:
+      d.cancellation_window_hours?.toString() ?? "",
+  };
+}
+
+export default function EditShopPage() {
+  const { id } = useParams<{ id: string }>();
+  const router = useRouter();
+
+  const [shop, setShop] = useState<Shop | null>(null);
+  const [form, setForm] = useState<FormValues | null>(null);
+  const [original, setOriginal] = useState<FormValues | null>(null);
+  const [staged, setStaged] = useState<StagedPhoto[]>([]);
+  const [advancedOpen, setAdvancedOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [toast, setToast] = useState<ToastMessage | null>(null);
+
+  async function loadShop() {
+    try {
+      const { data } = await api.get(`/shops/${id}/`);
+      setShop(data);
+      const v = toFormValues(data);
+      setForm(v);
+      setOriginal(v);
+    } catch (err) {
+      setToast({ variant: "error", message: formatApiError(err, "Failed to load.") });
+    }
+  }
+
+  useEffect(() => {
+    loadShop();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [id]);
+
+  // Revoke staged preview URLs on unmount.
+  useEffect(() => {
+    return () => staged.forEach((p) => URL.revokeObjectURL(p.preview));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const dirty = useMemo(() => {
+    if (!form || !original) return false;
+    return JSON.stringify(form) !== JSON.stringify(original) || staged.length > 0;
+  }, [form, original, staged]);
+
+  function update<K extends keyof FormValues>(k: K, v: FormValues[K]) {
+    setForm((prev) => (prev ? { ...prev, [k]: v } : prev));
+  }
+
+  function stagePhotos(e: ChangeEvent<HTMLInputElement>) {
+    const files = Array.from(e.target.files ?? []);
+    if (!files.length) return;
+    const existingCount = (shop?.photos.length ?? 0) + staged.length;
+    const remaining = MAX_PHOTOS - existingCount;
+    const accepted = files.slice(0, remaining).map((file) => ({
+      id: `${file.name}-${file.size}-${Math.random().toString(36).slice(2, 8)}`,
+      file,
+      preview: URL.createObjectURL(file),
+    }));
+    setStaged((prev) => [...prev, ...accepted]);
+    e.target.value = "";
+  }
+
+  function unstage(stagedId: string) {
+    setStaged((prev) => {
+      const target = prev.find((p) => p.id === stagedId);
+      if (target) URL.revokeObjectURL(target.preview);
+      return prev.filter((p) => p.id !== stagedId);
+    });
+  }
+
+  async function deleteExistingPhoto(photoId: number) {
+    if (!shop) return;
+    try {
+      await api.delete(`/shops/${id}/photos/${photoId}/`);
+      setShop({
+        ...shop,
+        photos: shop.photos.filter((p) => p.id !== photoId),
+      });
+      setToast({ variant: "success", message: "Photo removed." });
+    } catch (err) {
+      setToast({ variant: "error", message: formatApiError(err) });
+    }
+  }
+
+  async function uploadStaged() {
+    if (staged.length === 0) return;
+    setUploading(true);
+    try {
+      for (const p of staged) {
+        const fd = new FormData();
+        fd.append("image", p.file);
+        await api.post(`/shops/${id}/photos/`, fd, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+      }
+    } finally {
+      setUploading(false);
+    }
+  }
+
+  async function save(e: FormEvent) {
+    e.preventDefault();
+    if (!form) return;
+    if (!form.name.trim()) {
+      setToast({ variant: "error", message: "Shop name is required." });
+      return;
+    }
+    setSaving(true);
+    try {
+      const payload = {
+        ...form,
+        latitude: form.latitude ? Number(form.latitude) : null,
+        longitude: form.longitude ? Number(form.longitude) : null,
+        cancellation_window_hours: form.cancellation_window_hours
+          ? Number(form.cancellation_window_hours)
+          : null,
+      };
+      await api.patch(`/shops/${id}/`, payload);
+
+      if (staged.length > 0) {
+        await uploadStaged();
+        staged.forEach((p) => URL.revokeObjectURL(p.preview));
+        setStaged([]);
+      }
+
+      setToast({ variant: "success", message: "Changes saved." });
+      setOriginal(form);
+      // Refresh server data so we render the canonical state (e.g. server-side geocoded lat/lng)
+      await loadShop();
+    } catch (err) {
+      setToast({ variant: "error", message: formatApiError(err, "Failed to save.") });
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  if (!shop || !form) {
+    return <p className="py-10 text-center text-sm text-slate-500">Loading…</p>;
+  }
+
+  const hasPin = Boolean(form.address_line && form.city);
+  const photoCount = shop.photos.length + staged.length;
+
+  return (
+    <form onSubmit={save} className="space-y-4 py-4">
+      {/* HEADER */}
+      <header className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
+        <div className="flex items-center gap-3">
+          <Link
+            href={`/dashboard/shops/${id}`}
+            className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
+          >
+            <ArrowLeft size={16} />
+            Back
+          </Link>
+          <div>
+            <h1 className="text-xl font-semibold text-slate-900 sm:text-2xl">
+              Edit shop
+            </h1>
+            <p className="text-xs text-slate-500">{shop.name}</p>
+          </div>
+        </div>
+        {dirty && (
+          <span className="inline-flex items-center gap-1.5 self-start rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800">
+            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+            Unsaved changes
+          </span>
+        )}
+      </header>
+
+      <div className="grid gap-4 lg:grid-cols-3">
+        {/* LEFT: sections */}
+        <div className="space-y-4 lg:col-span-2">
+          {/* 1. BASIC INFO */}
+          <Section
+            index={1}
+            icon={Store}
+            title="Basic information"
+            subtitle="Name and description of your shop."
+          >
+            <Field label="Shop name" required>
+              <input
+                type="text"
+                value={form.name}
+                onChange={(e) => update("name", e.target.value)}
+                required
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              />
+            </Field>
+            <Field label="Description">
+              <div className="relative">
+                <textarea
+                  value={form.description}
+                  onChange={(e) =>
+                    update("description", e.target.value.slice(0, DESCRIPTION_MAX))
+                  }
+                  rows={4}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                />
+                <span className="pointer-events-none absolute bottom-2 right-3 text-xs text-slate-400">
+                  {form.description.length} / {DESCRIPTION_MAX}
+                </span>
+              </div>
+            </Field>
+          </Section>
+
+          {/* 2. PHOTOS */}
+          <Section
+            index={2}
+            icon={ImageIcon}
+            title="Shop photos"
+            subtitle="Customers see these on your shop page."
+          >
+            <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
+              {shop.photos.map((p) => (
+                <li
+                  key={`saved-${p.id}`}
+                  className="group relative overflow-hidden rounded-xl border border-slate-200 bg-slate-100"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={p.image}
+                    alt={p.caption || shop.name}
+                    className="aspect-[4/3] w-full object-cover"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => deleteExistingPhoto(p.id)}
+                    className="absolute right-2 top-2 rounded-full bg-white/95 p-1.5 text-slate-600 opacity-0 shadow transition group-hover:opacity-100 hover:bg-white hover:text-red-700"
+                    aria-label="Delete photo"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </li>
+              ))}
+              {staged.map((p) => (
+                <li
+                  key={`staged-${p.id}`}
+                  className="group relative overflow-hidden rounded-xl border-2 border-dashed border-brand-300 bg-slate-100"
+                >
+                  {/* eslint-disable-next-line @next/next/no-img-element */}
+                  <img
+                    src={p.preview}
+                    alt={p.file.name}
+                    className="aspect-[4/3] w-full object-cover"
+                  />
+                  <span className="absolute left-2 top-2 rounded-full bg-brand-600 px-2 py-0.5 text-xs font-medium text-white shadow">
+                    Pending upload
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => unstage(p.id)}
+                    className="absolute right-2 top-2 rounded-full bg-white/95 p-1.5 text-slate-600 opacity-0 shadow transition group-hover:opacity-100 hover:bg-white hover:text-red-700"
+                    aria-label="Remove pending photo"
+                  >
+                    <Trash2 size={16} />
+                  </button>
+                </li>
+              ))}
+            </ul>
+
+            <label className="flex cursor-pointer flex-col items-center justify-center gap-2 rounded-xl border-2 border-dashed border-slate-200 bg-slate-50/50 py-6 text-sm text-slate-600 hover:bg-slate-50">
+              <input
+                type="file"
+                accept="image/*"
+                multiple
+                onChange={stagePhotos}
+                className="sr-only"
+                disabled={photoCount >= MAX_PHOTOS}
+              />
+              <ImagePlus size={24} className="text-slate-400" />
+              <span className="font-medium text-slate-700">
+                {uploading ? "Uploading…" : "Add photo"}
+              </span>
+              <span className="text-xs text-slate-500">
+                PNG or JPG · up to {MAX_PHOTOS} photos
+              </span>
+            </label>
+            <p className="text-center text-xs text-slate-500">
+              {photoCount} of {MAX_PHOTOS} photos
+              {staged.length > 0 && ` · ${staged.length} pending upload`}
+            </p>
+          </Section>
+
+          {/* 3. LOCATION */}
+          <Section
+            index={3}
+            icon={MapPin}
+            title="Location"
+            subtitle="Coordinates auto-fill when the address changes."
+          >
+            <div className="grid gap-4 lg:grid-cols-3">
+              <div className="space-y-4 lg:col-span-2">
+                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                  <Field label="Address" required>
+                    <input
+                      type="text"
+                      value={form.address_line}
+                      onChange={(e) => update("address_line", e.target.value)}
+                      required
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                    />
+                  </Field>
+                  <Field label="City" required>
+                    <input
+                      type="text"
+                      value={form.city}
+                      onChange={(e) => update("city", e.target.value)}
+                      required
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                    />
+                  </Field>
+                  <Field label="Postal code">
+                    <input
+                      type="text"
+                      value={form.postal_code}
+                      onChange={(e) => update("postal_code", e.target.value)}
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                    />
+                  </Field>
+                  <Field label="Country" required>
+                    <Select
+                      value={form.country}
+                      onChange={(v) => update("country", v)}
+                      placeholder="Select country"
+                      options={[
+                        { value: "", label: "Select country", disabled: true },
+                        ...COUNTRIES.map((c) => ({ value: c, label: c })),
+                      ]}
+                    />
+                  </Field>
+                </div>
+              </div>
+              <div className="lg:col-span-1">
+                <MapPreview hasPin={hasPin} />
+              </div>
+            </div>
+          </Section>
+
+          {/* 4. CONTACT */}
+          <Section
+            index={4}
+            icon={Phone}
+            title="Contact information"
+            subtitle="How customers reach you."
+          >
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Phone">
+                <input
+                  type="tel"
+                  value={form.phone}
+                  onChange={(e) => update("phone", e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                />
+              </Field>
+              <Field label="Email">
+                <input
+                  type="email"
+                  value={form.email}
+                  onChange={(e) => update("email", e.target.value)}
+                  className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                />
+              </Field>
+            </div>
+          </Section>
+
+          {/* 5. BOOKING SETTINGS */}
+          <Section
+            index={5}
+            icon={Building2}
+            title="Booking settings"
+            subtitle="Customer-facing cancellation rules."
+          >
+            <Field label="Cancellation window (hours)">
+              <input
+                type="number"
+                min={0}
+                value={form.cancellation_window_hours}
+                onChange={(e) =>
+                  update("cancellation_window_hours", e.target.value)
+                }
+                placeholder="e.g. 24"
+                className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 sm:max-w-xs"
+              />
+              <p className="mt-1.5 text-xs text-slate-500">
+                Customers can cancel up to this many hours before their reservation
+                without a strike.
+              </p>
+            </Field>
+          </Section>
+
+          {/* 6. ADVANCED */}
+          <section className="rounded-2xl border border-slate-200 bg-white">
+            <button
+              type="button"
+              onClick={() => setAdvancedOpen((v) => !v)}
+              className="flex w-full items-center justify-between gap-3 px-5 py-4 text-left"
+            >
+              <div className="flex items-start gap-4">
+                <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-600">
+                  <Sliders size={18} />
+                </div>
+                <div>
+                  <div className="font-semibold text-slate-900">
+                    <span className="mr-1.5 text-slate-400">6.</span>
+                    Advanced{" "}
+                    <span className="font-normal text-slate-500">(optional)</span>
+                  </div>
+                  <p className="mt-0.5 text-sm text-slate-500">
+                    Override coordinates manually if geocoding got it wrong.
+                  </p>
+                </div>
+              </div>
+              {advancedOpen ? (
+                <ChevronUp size={18} className="text-slate-400" />
+              ) : (
+                <ChevronDown size={18} className="text-slate-400" />
+              )}
+            </button>
+            {advancedOpen && (
+              <div className="border-t border-slate-100 px-5 py-4">
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field label="Latitude">
+                    <input
+                      type="text"
+                      value={form.latitude}
+                      onChange={(e) => update("latitude", e.target.value)}
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                    />
+                  </Field>
+                  <Field label="Longitude">
+                    <input
+                      type="text"
+                      value={form.longitude}
+                      onChange={(e) => update("longitude", e.target.value)}
+                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                    />
+                  </Field>
+                </div>
+              </div>
+            )}
+          </section>
+        </div>
+
+        {/* RIGHT: sidebar with quick links */}
+        <aside className="space-y-4 lg:col-span-1">
+          <SidebarCard tone="slate" title="Manage" body="Jump to other parts of this shop.">
+            <ul className="space-y-1">
+              <QuickLink
+                href={`/dashboard/shops/${id}/hours`}
+                icon={Clock}
+                label="Hours"
+              />
+              <QuickLink
+                href={`/dashboard/shops/${id}/overrides`}
+                icon={CalendarClock}
+                label="Date overrides"
+              />
+              <QuickLink
+                href={`/dashboard/shops/${id}/staff`}
+                icon={Users}
+                label="Staff"
+              />
+              <QuickLink
+                href={`/dashboard/shops/${id}/analytics`}
+                icon={BarChart3}
+                label="Analytics"
+              />
+            </ul>
+          </SidebarCard>
+
+          <SidebarCard
+            tone="slate"
+            title="Shop status"
+            body={
+              shop.status === "active"
+                ? "Your shop is live and accepting bookings."
+                : shop.status === "paused"
+                  ? "Paused — customers can't book until you publish."
+                  : "Pending review."
+            }
+          >
+            <span
+              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${
+                shop.status === "active"
+                  ? "bg-emerald-100 text-emerald-700"
+                  : shop.status === "paused"
+                    ? "bg-amber-100 text-amber-700"
+                    : "bg-slate-100 text-slate-700"
+              }`}
+            >
+              <span className="h-1.5 w-1.5 rounded-full bg-current" />
+              {shop.status[0].toUpperCase() + shop.status.slice(1)}
+            </span>
+          </SidebarCard>
+        </aside>
+      </div>
+
+      {/* STICKY SAVE BAR */}
+      <div className="sticky bottom-4 flex flex-col-reverse gap-2 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-end">
+        <Link
+          href={`/dashboard/shops/${id}`}
+          className="inline-flex items-center justify-center rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
+        >
+          Cancel
+        </Link>
+        <button
+          type="submit"
+          disabled={!dirty || saving}
+          className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-brand-600 px-5 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {saving ? "Saving…" : "Save changes"}
+        </button>
+      </div>
+
+      <Toast toast={toast} onDismiss={() => setToast(null)} />
+    </form>
+  );
+}
+
+function Select({
+  value,
+  onChange,
+  options,
+  placeholder,
+}: {
+  value: string;
+  onChange: (v: string) => void;
+  options: { value: string; label: string; disabled?: boolean }[];
+  placeholder?: string;
+}) {
+  return (
+    <div className="relative">
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full appearance-none rounded-lg border border-slate-300 bg-white px-3 py-2 pr-9 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+      >
+        {placeholder && !value && (
+          <option value="" disabled>
+            {placeholder}
+          </option>
+        )}
+        {options.map((o) => (
+          <option key={o.value} value={o.value} disabled={o.disabled}>
+            {o.label}
+          </option>
+        ))}
+      </select>
+      <ChevronDown
+        size={16}
+        className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
+      />
+    </div>
+  );
+}
+
+/**
+ * Same lightweight map placeholder as the new shop page — visual confirmation
+ * that the address turned into a pin, no map tiles dependency.
+ */
+function MapPreview({ hasPin }: { hasPin: boolean }) {
+  return (
+    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
+      <div
+        className="relative h-32 w-full bg-slate-100"
+        style={{
+          backgroundImage:
+            "linear-gradient(135deg, rgb(241 245 249) 25%, transparent 25%), linear-gradient(225deg, rgb(241 245 249) 25%, transparent 25%), linear-gradient(45deg, rgb(241 245 249) 25%, transparent 25%), linear-gradient(315deg, rgb(241 245 249) 25%, rgb(248 250 252) 25%)",
+          backgroundPosition: "10px 0, 10px 0, 0 0, 0 0",
+          backgroundSize: "20px 20px",
+          backgroundRepeat: "repeat",
+        }}
+      >
+        <div className="absolute inset-0 flex items-center justify-center">
+          <MapPin
+            size={32}
+            className={hasPin ? "text-brand-600" : "text-slate-300"}
+            strokeWidth={2.25}
+            fill={hasPin ? "currentColor" : "none"}
+          />
+        </div>
+      </div>
+      <div
+        className={`flex items-center gap-1.5 px-3 py-2 text-xs ${
+          hasPin ? "text-emerald-700" : "text-slate-500"
+        }`}
+      >
+        <span
+          className={`h-1.5 w-1.5 rounded-full ${
+            hasPin ? "bg-emerald-500" : "bg-slate-300"
+          }`}
+        />
+        {hasPin
+          ? "Pin updates when address changes"
+          : "Enter an address to drop a pin"}
+      </div>
+    </div>
+  );
+}
+
+function QuickLink({
+  href,
+  icon: Icon,
+  label,
+}: {
+  href: string;
+  icon: typeof Clock;
+  label: string;
+}) {
+  return (
+    <li>
+      <Link
+        href={href}
+        className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
+      >
+        <span className="inline-flex items-center gap-2">
+          <Icon size={14} className="text-slate-400" />
+          {label}
+        </span>
+        <span className="text-slate-400">→</span>
+      </Link>
+    </li>
+  );
+}

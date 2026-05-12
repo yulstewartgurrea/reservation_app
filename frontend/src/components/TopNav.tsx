@@ -1,6 +1,7 @@
 "use client";
 
 import Link from "next/link";
+import Image from "next/image";
 import { useEffect } from "react";
 import { useAuth } from "@/lib/auth";
 import { ChatBadge } from "./ChatBadge";
@@ -16,8 +17,15 @@ export function TopNav() {
   return (
     <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
-        <Link href="/" className="text-lg font-semibold text-brand-600">
-          Reserva
+        <Link href="/shops" aria-label="Browse shops" className="flex items-center">
+          <Image
+            src="/logo.png"
+            alt="BookMo"
+            width={888}
+            height={281}
+            priority
+            className="h-9 w-auto"
+          />
         </Link>
         <nav className="flex items-center gap-3 text-sm">
           <Link href="/shops" className="rounded px-3 py-2 hover:bg-slate-100">

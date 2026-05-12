@@ -498,6 +498,8 @@ The workflow only fires on changes under `frontend/**` or the workflow file itse
 
 ### First-time setup (do this once)
 
+**Prerequisites for the IAM user running `terragrunt apply`:** it needs `AdministratorAccess` (or, at minimum, full permissions on `s3`, `cloudfront`, `iam`, and `acm`). Project-scoped policies like `PowerUserAccess` won't work — Terraform creates an OIDC provider and IAM role here, and those require IAM-management permissions. The IAM user can't grant itself permissions, so attach `AdministratorAccess` from the **root account** in the AWS Console (IAM → Users → your-user → Add permissions → Attach policies directly).
+
 #### 1. Create the Terraform state bucket
 
 ```bash
@@ -540,7 +542,9 @@ terragrunt apply
 
 #### 4. Configure GitHub Environments
 
-In **Settings → Environments**, create `staging` and `prod`. For each, add these **Variables** (Variables tab, not Secrets — none of these are sensitive):
+In **Settings → Environments**, create two environments. **Names must be exactly `staging` and `prod`** (lowercase) — these strings are hardcoded in [.github/workflows/frontend-deploy.yml](.github/workflows/frontend-deploy.yml) under `environment:`. A typo here makes the deploy fail at "Set up job: Environment 'X' does not exist".
+
+For each, add these **Variables** (Variables tab, not Secrets — none of these are sensitive):
 
 | Variable | staging | prod |
 |---|---|---|
@@ -611,6 +615,21 @@ If you need a new `NEXT_PUBLIC_*` var, add it to:
 1. The GitHub Environment (both staging and prod).
 2. The `env:` block of the **Build** step in [.github/workflows/frontend-deploy.yml](.github/workflows/frontend-deploy.yml).
 
+### Dynamic routes under static export
+
+Next.js static export requires every dynamic route (e.g. `[id]`) to declare which params it'll pre-render via `generateStaticParams()`. Because our IDs come from the DB at runtime, we pre-render a placeholder route per dynamic page (`{ id: "_" }`) and rely on CloudFront's 403/404 → `/index.html` fallback to serve real IDs.
+
+The pattern, used on every dynamic-route page:
+
+- `page.tsx` — server component, exports `generateStaticParams()` returning a placeholder, renders a thin client wrapper.
+- `_client.tsx` — the actual UI; starts with `"use client"`, default-exports the page component (uses `useParams()` to read the ID from the URL).
+
+Example: [src/app/chat/[roomId]/page.tsx](frontend/src/app/chat/[roomId]/page.tsx) + [src/app/chat/[roomId]/_client.tsx](frontend/src/app/chat/[roomId]/_client.tsx).
+
+**When you add a new dynamic route**, copy that pattern. Don't put `"use client"` directly in `page.tsx` — generateStaticParams can't live in a client component, and the build will fail with `Page "X" is missing "generateStaticParams()"`.
+
+> ⚠️ Next 15.1 quirk: `generateStaticParams` must return *at least one* placeholder. Returning `[]` triggers the same "missing" error even though the function exists. Use `[{ id: "_" }]` (or whatever the segment name is).
+
 ### Rollback
 
 S3 versioning is enabled on the frontend buckets, but the simplest rollback is **redeploy a previous commit**:
@@ -675,13 +694,14 @@ CloudFront didn't invalidate, or the browser cached the old HTML. Check the work
 **Workflow says "No environment mapping for ref refs/heads/foo"**
 You pushed to a branch other than `staging` or `main`. Either rename the branch, or add it to the mapping in [.github/workflows/frontend-deploy.yml](.github/workflows/frontend-deploy.yml) **and** to `github_deploy_refs` in the corresponding env's [region.hcl](aws/accounts/stage/ap-southeast-1/region.hcl).
 
+**`terragrunt apply` fails with `AccessDenied` on `iam:CreateOpenIDConnectProvider` or `cloudfront:CreateOriginAccessControl`**
+Your IAM user is missing IAM/CloudFront management permissions. See the "Prerequisites" note at the top of [First-time setup](#first-time-setup-do-this-once) — attach `AdministratorAccess` from the root account, then re-run apply (Terragrunt is idempotent, it'll resume).
+
 **`terragrunt apply` fails with `BucketAlreadyExists` on the frontend bucket**
 S3 bucket names are **globally unique** across all AWS accounts. Edit `frontend_bucket_name` in [aws/accounts/stage/ap-southeast-1/region.hcl](aws/accounts/stage/ap-southeast-1/region.hcl) (and/or the prod one) — add a suffix like `-936146782254` or your initials. Re-run apply.
 
 **`next build` fails locally with "Page X is missing generateStaticParams"**
-A dynamic route (`[id]`) needs to know which IDs to pre-render. Either:
-- Add `export const dynamic = "force-dynamic"` (won't work with static export) — actually no, this fails too.
-- Add `generateStaticParams()` returning a list, even if empty: `export function generateStaticParams() { return []; }`. The route will render client-side via the SPA fallback.
+The page is either a client component (`"use client"`) — generateStaticParams can't live there — or it returns an empty array (Next 15.1 quirk). See [Dynamic routes under static export](#dynamic-routes-under-static-export) for the page/`_client.tsx` split pattern.
 
 ---
 

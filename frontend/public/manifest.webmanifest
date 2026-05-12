@@ -1,6 +1,6 @@
 {
-  "name": "Reserva",
-  "short_name": "Reserva",
+  "name": "BookMo",
+  "short_name": "BookMo",
   "description": "Book local services in seconds.",
   "start_url": "/",
   "display": "standalone",
