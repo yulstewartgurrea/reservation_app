@@ -705,6 +705,9 @@ You pushed to a branch other than `staging` or `main`. Either rename the branch,
 **`terragrunt apply` fails with `AccessDenied` on `iam:CreateOpenIDConnectProvider` or `cloudfront:CreateOriginAccessControl`**
 Your IAM user is missing IAM/CloudFront management permissions. See the "Prerequisites" note at the top of [First-time setup](#first-time-setup-do-this-once) — attach `AdministratorAccess` from the root account, then re-run apply (Terragrunt is idempotent, it'll resume).
 
+**Workflow fails with `Invalid bucket name "...\n"` or similar in the `aws s3 sync` step**
+A GitHub Environment variable has a stray newline or trailing whitespace — copy-pasting a value with a newline into the GitHub UI preserves it. Re-edit the variable (Settings → Environments → staging → Variables → pencil icon) and re-enter without the trailing newline. The workflow strips whitespace defensively (see [.github/workflows/frontend-deploy.yml](.github/workflows/frontend-deploy.yml)), so this only bites if you paste with a newline AND the strip somehow fails.
+
 **`terragrunt apply` fails with `BucketAlreadyExists` on the frontend bucket**
 S3 bucket names are **globally unique** across all AWS accounts. Edit `frontend_bucket_name` in [aws/accounts/stage/ap-southeast-1/region.hcl](aws/accounts/stage/ap-southeast-1/region.hcl) (and/or the prod one) — add a suffix like `-936146782254` or your initials. Re-run apply.
 
