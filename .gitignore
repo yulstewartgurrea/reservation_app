@@ -1,0 +1,20 @@
+# Python
+__pycache__/
+*.py[cod]
+*.sqlite3
+backend/.env
+backend/media/
+backend/staticfiles/
+
+# Node
+node_modules/
+.next/
+frontend/.env*.local
+
+# Docker
+.dockerignore
+
+# OS
+.DS_Store
+.idea/
+.vscode/

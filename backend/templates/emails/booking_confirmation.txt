@@ -1,0 +1,14 @@
+Hi {{ customer_name }},
+
+Your booking at {{ shop.name }} is confirmed:
+
+Service: {{ service.name }}
+When: {{ start_at|date:"l, F j, Y" }} at {{ start_at|time:"g:i A" }}
+Duration: {{ service.duration_minutes }} minutes
+Price: ${{ service.price }} (pay on arrival)
+
+Address: {{ shop.address_line }}, {{ shop.city }}
+
+You can manage this booking at: {{ frontend_url }}/reservations
+
+— Reserva
