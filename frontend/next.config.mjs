@@ -1,8 +1,7 @@
-import { PHASE_DEVELOPMENT_SERVER } from "next/constants";
-
 /** @type {(phase: string) => import('next').NextConfig} */
 export default function config(phase) {
-  const isDev = phase === PHASE_DEVELOPMENT_SERVER;
+  // Inlined from next/constants — avoids ESM resolution issues in .mjs.
+  const isDev = phase === "phase-development-server";
   return {
     reactStrictMode: true,
     // Static export — emits `out/` for S3 + CloudFront hosting. Skipped in dev so
