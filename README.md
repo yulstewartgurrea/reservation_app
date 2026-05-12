@@ -674,7 +674,9 @@ Within free tier for a small app:
 
 Expected monthly: **$0** for the first few thousand users. The biggest risk is invalidation cost if you redeploy 50+ times a day — the workflow uses `--paths /*` which counts as **one path** per invalidation, so this is fine.
 
-### Troubleshooting
+### Troubleshooting (bug + fix log)
+
+This section is the running log of issues we've hit during deployment, keyed by symptom for fast lookup. **When you hit a new bug, add an entry here** with the error you saw (verbatim where possible), the root cause, and what fixed it. Future-you and future-me will thank you.
 
 **Workflow fails on "configure-aws-credentials" with `Error: Not authorized to perform sts:AssumeRoleWithWebIdentity`**
 The OIDC trust policy's `sub` claim filter didn't match the token GitHub presented. Common causes:
@@ -700,7 +702,7 @@ The SPA fallback rule on CloudFront isn't firing. Check the distribution's "Erro
 CloudFront didn't invalidate, or the browser cached the old HTML. Check the workflow's "Invalidate CloudFront" step. Hard-refresh (Cmd+Shift+R / Ctrl+Shift+R).
 
 **Workflow says "No environment mapping for ref refs/heads/foo"**
-You pushed to a branch other than `staging` or `main`. Either rename the branch, or add it to the mapping in [.github/workflows/frontend-deploy.yml](.github/workflows/frontend-deploy.yml) **and** to `github_deploy_refs` in the corresponding env's [region.hcl](aws/accounts/stage/ap-southeast-1/region.hcl).
+You pushed to a branch other than `staging` or `main`. Either rename the branch, or add it to the mapping in [.github/workflows/frontend-deploy.yml](.github/workflows/frontend-deploy.yml) (the `resolve` job). The IAM trust policy keys off the GitHub Environment name, not the branch, so adding a branch only requires the workflow change — no Terraform update needed unless you're adding a new environment too.
 
 **`terragrunt apply` fails with `AccessDenied` on `iam:CreateOpenIDConnectProvider` or `cloudfront:CreateOriginAccessControl`**
 Your IAM user is missing IAM/CloudFront management permissions. See the "Prerequisites" note at the top of [First-time setup](#first-time-setup-do-this-once) — attach `AdministratorAccess` from the root account, then re-run apply (Terragrunt is idempotent, it'll resume).
@@ -713,6 +715,12 @@ S3 bucket names are **globally unique** across all AWS accounts. Edit `frontend_
 
 **`next build` fails locally with "Page X is missing generateStaticParams"**
 The page is either a client component (`"use client"`) — generateStaticParams can't live there — or it returns an empty array (Next 15.1 quirk). See [Dynamic routes under static export](#dynamic-routes-under-static-export) for the page/`_client.tsx` split pattern.
+
+**`next build` fails in CI with `Cannot find module '.../node_modules/next/constants' ... Did you mean to import "next/constants.js"?`**
+Importing `next/constants` from `next.config.mjs` works locally (CommonJS resolution) but fails under stricter ESM resolution in the CI Node runtime. Fix: don't import it — inline the constant string. We need `phase === "phase-development-server"` to skip `output: "export"` in `next dev` so dynamic routes still work locally; that string is stable, so [frontend/next.config.mjs](frontend/next.config.mjs) compares to it directly instead of importing `PHASE_DEVELOPMENT_SERVER`.
+
+**`next dev` fails locally with "Page X is missing generateStaticParams" when visiting a real ID like `/shops/1`**
+You set `output: "export"` unconditionally and `next dev` is now rejecting any non-placeholder ID. Fix: make the `output: export` setting conditional on the build phase so dev mode keeps server-rendering — see [frontend/next.config.mjs](frontend/next.config.mjs) (it checks `phase === "phase-development-server"`).
 
 ---
 
