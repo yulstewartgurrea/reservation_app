@@ -144,20 +144,27 @@ aws/
 │   │   ├── variables.tf            #      → aws_region, account_id, profile_name, common_tags
 │   │   └── versions_override.tf    #      → terraform >= 1.5, aws >= 5.0
 │   │
-│   └── stage/                      #    stage environment
-│       ├── account.hcl             #      → reads account_id + profile_name from global.hcl
-│       └── ap-southeast-1/         #      region: Singapore (lowest latency to PH)
-│           ├── region.hcl          #      ★ the meaty config — ECS services, RDS, Redis, etc.
-│           │
-│           ├── networking/terragrunt.hcl   # stub: include base + layer
-│           ├── ecr/terragrunt.hcl
-│           ├── parameters/
-│           │   ├── env.yaml                # ★ app config + secrets, by key
-│           │   └── terragrunt.hcl
-│           ├── rds/terragrunt.hcl
-│           ├── redis/terragrunt.hcl
-│           ├── ecs/terragrunt.hcl
-│           └── storage/terragrunt.hcl
+│   ├── stage/                      #    stage environment
+│   │   ├── account.hcl             #      → reads account_id + profile_name from global.hcl
+│   │   └── ap-southeast-1/         #      region: Singapore (lowest latency to PH)
+│   │       ├── region.hcl          #      ★ the meaty config — ECS services, RDS, Redis, etc.
+│   │       │
+│   │       ├── networking/terragrunt.hcl   # stub: include base + layer
+│   │       ├── ecr/terragrunt.hcl
+│   │       ├── parameters/
+│   │       │   ├── env.yaml                # ★ app config + secrets, by key
+│   │       │   └── terragrunt.hcl
+│   │       ├── rds/terragrunt.hcl
+│   │       ├── redis/terragrunt.hcl
+│   │       ├── ecs/terragrunt.hcl
+│   │       ├── storage/terragrunt.hcl
+│   │       └── frontend_hosting/terragrunt.hcl  # S3 + CloudFront for Next.js static export
+│   │
+│   └── prod/                       #    prod environment (frontend-only for now)
+│       ├── account.hcl
+│       └── ap-southeast-1/
+│           ├── region.hcl
+│           └── frontend_hosting/terragrunt.hcl
 │
 └── layers/                         # ── reusable Terraform modules ──
     ├── networking/                 #    VPC + subnets + NAT + VPC endpoints + SGs
@@ -166,7 +173,8 @@ aws/
     ├── rds/                        #    RDS Postgres + SSM params for connection details
     ├── redis/                      #    ElastiCache Redis + SSM params for REDIS_URL
     ├── ecs/                        #    ECS cluster + services + internal ALB + IAM
-    └── storage/                    #    S3 buckets (private + public lists)
+    ├── storage/                    #    S3 buckets (private + public lists)
+    └── frontend_hosting/           #    S3 + CloudFront + OAC + GitHub OIDC deploy role
 ```
 
 Each layer is a self-contained Terraform module with `_include.hcl` (Terragrunt glue),
@@ -321,6 +329,27 @@ Today stage has one private bucket: `s3-reservation-stage-media`. Django's `MEDI
 point here via `django-storages[s3]` (not wired in app code yet — when you wire it, set
 `AWS_STORAGE_BUCKET_NAME` to the bucket and grant the task IAM role `s3:GetObject` / `s3:PutObject`
 on `arn:aws:s3:::s3-reservation-stage-media/*`).
+
+### `frontend_hosting`
+
+**Creates** — S3 bucket (private, OAC-locked) + CloudFront distribution + GitHub OIDC provider + per-env deploy IAM role.
+
+Hosts the Next.js static export. The bucket is **not** publicly readable; CloudFront fetches via Origin Access Control. CloudFront `default_root_object = index.html` and 403/404 → `/index.html` so SPA-style client navigation and hard refreshes both work.
+
+**OIDC provider quirk** — AWS allows only one OIDC provider per (account, issuer). The `stage` env creates it; `prod` reuses it by passing the ARN in [aws/accounts/prod/ap-southeast-1/frontend_hosting/terragrunt.hcl](../aws/accounts/prod/ap-southeast-1/frontend_hosting/terragrunt.hcl) `inputs.github_oidc_provider_arn`. Apply stage first, copy the output, then apply prod.
+
+**Deploy role trust** is scoped tight: only `repo:yulstewartgurrea/reservation_app:ref:<allowed-branch>` can assume it. Stage allows `staging`; prod allows `main`. Edit `github_deploy_refs` in each env's `region.hcl` to change.
+
+**Outputs to wire into GitHub Environments** (Settings → Environments → staging / prod, add as **variables**):
+
+| GitHub variable | Terraform output |
+|---|---|
+| `AWS_DEPLOY_ROLE_ARN` | `github_deploy_role_arn` |
+| `AWS_S3_BUCKET` | `bucket_name` |
+| `AWS_CLOUDFRONT_DISTRIBUTION_ID` | `cloudfront_distribution_id` |
+| `NEXT_PUBLIC_API_URL` | (your backend URL for that env) |
+
+Full deploy flow lives in [README.md](../README.md) under "Frontend deploy".
 
 ---
 
@@ -545,6 +574,61 @@ In [region.hcl](accounts/stage/ap-southeast-1/region.hcl), find the service and 
 cd aws/accounts/stage/ap-southeast-1/ecs
 terragrunt apply
 ```
+
+### Frontend: first-time provisioning
+
+```bash
+# (1) stage
+cd aws/accounts/stage/ap-southeast-1/frontend_hosting
+terragrunt apply
+# Note `github_oidc_provider_arn` from the outputs.
+
+# (2) prod — paste the OIDC ARN into
+#     aws/accounts/prod/ap-southeast-1/frontend_hosting/terragrunt.hcl
+#     (replace PASTE_OIDC_PROVIDER_ARN_FROM_STAGE_OUTPUTS), then:
+cd ../../../prod/ap-southeast-1/frontend_hosting
+terragrunt apply
+```
+
+Then wire the outputs into GitHub Environments (Settings → Environments → staging / prod → Variables):
+`AWS_DEPLOY_ROLE_ARN`, `AWS_S3_BUCKET`, `AWS_CLOUDFRONT_DISTRIBUTION_ID`, `NEXT_PUBLIC_API_URL`. See [README → Frontend deploy](../README.md#frontend-deploy-s3--cloudfront) for the full first-time runbook.
+
+### Frontend: deploy new code
+
+You don't. Pushing to `staging` or `main` (with changes under `frontend/**`) triggers [.github/workflows/frontend-deploy.yml](../.github/workflows/frontend-deploy.yml), which builds, syncs to S3, and invalidates CloudFront. To force a redeploy without code changes:
+
+```bash
+git commit --allow-empty -m "Redeploy frontend"
+git push origin staging   # or main
+```
+
+### Frontend: rotate the deploy role
+
+If the role is compromised (or you want to change which branches can deploy):
+
+```bash
+# Edit github_deploy_refs in region.hcl for the env, then:
+cd aws/accounts/stage/ap-southeast-1/frontend_hosting
+terragrunt apply
+
+# Then in GitHub Settings → Environments → <env>, refresh AWS_DEPLOY_ROLE_ARN
+# (it usually won't change unless you also renamed it).
+```
+
+### Frontend: rollback
+
+Easiest path is "redeploy an earlier commit":
+
+```bash
+git log --oneline staging   # or main
+git push origin <good-sha>:staging --force-with-lease
+```
+
+The workflow re-runs against that SHA, rebuilds, re-syncs, invalidates. ~2 min to back.
+
+For prod, prefer `git revert <bad-sha>` + PR + merge — better audit trail than force-push.
+
+S3 versioning is enabled, so even if you nuked the bucket you can recover prior object versions via `aws s3api list-object-versions`.
 
 ### Tear down stage
 

@@ -452,6 +452,239 @@ docker compose exec worker celery -A config call apps.reservations.tasks.auto_ma
 
 ---
 
+## Frontend deploy (S3 + CloudFront)
+
+The frontend is a Next.js **static export** (`output: "export"` in [frontend/next.config.mjs](frontend/next.config.mjs)) hosted on S3, fronted by CloudFront. No API routes, no middleware, no server actions, no ISR — all data fetching is client-side via TanStack Query against the Django API.
+
+### Architecture
+
+```
+   git push staging                       git push main
+        │                                       │
+        ▼                                       ▼
+  ┌───────────────────────────────────────────────────┐
+  │  GitHub Actions: .github/workflows/frontend-deploy │
+  │  (npm ci → next build → s3 sync → invalidate)     │
+  └───────────────────────────────────────────────────┘
+        │ OIDC: assume role                    │ OIDC: assume role
+        │ (only refs/heads/staging allowed)    │ (only refs/heads/main allowed)
+        ▼                                       ▼
+  ┌─────────────────────────┐         ┌─────────────────────────┐
+  │  STAGING (in same AWS)  │         │  PROD (same AWS account) │
+  │  • S3: …-stage-frontend │         │  • S3: …-prod-frontend   │
+  │  • CloudFront (OAC)     │         │  • CloudFront (OAC)      │
+  │  • IAM role (staging)   │         │  • IAM role (prod)       │
+  └─────────────────────────┘         └─────────────────────────┘
+              │                                   │
+              ▼                                   ▼
+       dxxxxxx.cloudfront.net           dyyyyyy.cloudfront.net
+```
+
+Key properties:
+
+- **S3 buckets are private.** Only CloudFront can read them (via Origin Access Control). No public-access ACL bullshit.
+- **No long-lived AWS keys in GitHub.** GH Actions assumes an IAM role via OIDC. The role's trust policy is locked to this repo + the specific branch (staging role only trusts `refs/heads/staging`; prod only `refs/heads/main`).
+- **Cache strategy:** `/_next/*` is fingerprinted (hashes in filename) → 1-year immutable cache. HTML and root assets → 60s cache + `must-revalidate`. Every deploy invalidates `/*` so HTML reloads quickly.
+- **SPA fallback:** CloudFront rewrites 403/404 → `/index.html` so hard refreshes on dynamic routes work.
+
+### Branch → environment mapping
+
+| Branch | Environment | CloudFront URL |
+|---|---|---|
+| `staging` | staging | `<stage cloudfront_domain_name>` |
+| `main` | prod | `<prod cloudfront_domain_name>` |
+
+The workflow only fires on changes under `frontend/**` or the workflow file itself, so backend-only pushes don't trigger a frontend redeploy. You can also force a deploy via the workflow's `workflow_dispatch` input.
+
+### First-time setup (do this once)
+
+#### 1. Create the Terraform state bucket
+
+```bash
+aws s3api create-bucket \
+  --bucket terraform-states-936146782254-ap-southeast-1 \
+  --region ap-southeast-1 \
+  --create-bucket-configuration LocationConstraint=ap-southeast-1 \
+  --profile reservation-stage
+
+aws s3api put-bucket-versioning \
+  --bucket terraform-states-936146782254-ap-southeast-1 \
+  --versioning-configuration Status=Enabled \
+  --profile reservation-stage
+```
+
+#### 2. Apply the staging infra
+
+```bash
+cd aws/accounts/stage/ap-southeast-1/frontend_hosting
+terragrunt apply
+```
+
+Save these outputs — you'll need them:
+- `github_oidc_provider_arn`
+- `github_deploy_role_arn`
+- `bucket_name`
+- `cloudfront_distribution_id`
+- `cloudfront_domain_name`
+
+#### 3. Apply the prod infra
+
+Paste the stage `github_oidc_provider_arn` into [aws/accounts/prod/ap-southeast-1/frontend_hosting/terragrunt.hcl](aws/accounts/prod/ap-southeast-1/frontend_hosting/terragrunt.hcl) (replacing `PASTE_OIDC_PROVIDER_ARN_FROM_STAGE_OUTPUTS`), then:
+
+```bash
+cd aws/accounts/prod/ap-southeast-1/frontend_hosting
+terragrunt apply
+```
+
+(AWS only allows one OIDC provider per account per issuer — stage creates it, prod reuses it.)
+
+#### 4. Configure GitHub Environments
+
+In **Settings → Environments**, create `staging` and `prod`. For each, add these **Variables** (Variables tab, not Secrets — none of these are sensitive):
+
+| Variable | staging | prod |
+|---|---|---|
+| `AWS_DEPLOY_ROLE_ARN` | stage `github_deploy_role_arn` | prod `github_deploy_role_arn` |
+| `AWS_S3_BUCKET` | `s3-reservation-stage-frontend` | `s3-reservation-prod-frontend` |
+| `AWS_CLOUDFRONT_DISTRIBUTION_ID` | stage `cloudfront_distribution_id` | prod `cloudfront_distribution_id` |
+| `NEXT_PUBLIC_API_URL` | backend URL (leave blank until deployed) | backend URL (leave blank until deployed) |
+
+Optional but recommended for `prod`: turn on **Required reviewers** to gate prod deploys behind a manual approval.
+
+#### 5. First deploy
+
+```bash
+git push origin staging      # → staging deploys
+git push origin main         # → prod deploys
+```
+
+Visit the CloudFront URL — site should load. (If `NEXT_PUBLIC_API_URL` is blank, API calls 404, but the SPA itself renders.)
+
+> **If you pushed the workflow file *before* step 4** (configuring the GitHub Environment), the first run will fail at "Configure AWS credentials" because the env vars don't exist yet. That's expected. Finish step 4, then retrigger with:
+> ```bash
+> git commit --allow-empty -m "Retrigger deploy"
+> git push origin staging
+> ```
+
+### Day-to-day workflow
+
+```
+                      ┌───────────────────────────┐
+                      │  open PR against staging  │
+                      │  • CI builds & previews   │ (no preview env in v1)
+                      └─────────────┬─────────────┘
+                                    │ merge
+                                    ▼
+                      ┌───────────────────────────┐
+                      │  push to staging          │
+                      │  → workflow: deploy stage │
+                      │  → smoke test the stage   │
+                      │    CloudFront URL         │
+                      └─────────────┬─────────────┘
+                                    │ open PR staging → main
+                                    │ merge
+                                    ▼
+                      ┌───────────────────────────┐
+                      │  push to main             │
+                      │  → workflow: deploy prod  │
+                      │  (gated by env reviewers  │
+                      │   if you enabled them)    │
+                      └───────────────────────────┘
+```
+
+Every push that changes anything under `frontend/` triggers the workflow. To skip a deploy (e.g. for a docs-only frontend change), use `[skip ci]` in the commit message.
+
+### Updating `NEXT_PUBLIC_API_URL` (or any env var)
+
+Env vars are baked in at **build time** in static export — they're literally inlined into the JS bundle. To change one:
+
+1. Update the GitHub Environment variable in **Settings → Environments → staging / prod**.
+2. Trigger a redeploy: either push an empty commit or run the workflow via `workflow_dispatch`.
+
+```bash
+# trigger a no-op redeploy
+git commit --allow-empty -m "Redeploy: update NEXT_PUBLIC_API_URL"
+git push origin staging
+```
+
+If you need a new `NEXT_PUBLIC_*` var, add it to:
+1. The GitHub Environment (both staging and prod).
+2. The `env:` block of the **Build** step in [.github/workflows/frontend-deploy.yml](.github/workflows/frontend-deploy.yml).
+
+### Rollback
+
+S3 versioning is enabled on the frontend buckets, but the simplest rollback is **redeploy a previous commit**:
+
+```bash
+# find the SHA you want to roll back to
+git log --oneline staging
+
+# force-push that SHA back to staging
+git push origin <good-sha>:staging --force-with-lease
+```
+
+This re-runs the workflow against the old code, rebuilding and re-syncing. CloudFront invalidates and you're back within ~2 min.
+
+For prod: open a "revert PR" against `main` (`git revert <bad-sha>` → PR → merge). Cleaner audit trail than a force-push.
+
+### Custom domain (later)
+
+Currently shipping on default `*.cloudfront.net`. When you have a domain:
+
+1. Buy/register the domain (Route 53 or external registrar).
+2. Request an ACM certificate **in `us-east-1`** (CloudFront only accepts certs from us-east-1).
+3. Set `frontend_cloudfront_alias = ["app.yourdomain.com"]` in [aws/accounts/<env>/ap-southeast-1/region.hcl](aws/accounts/stage/ap-southeast-1/region.hcl).
+4. Pass the cert ARN into the layer (need to extend [aws/layers/frontend_hosting/main.tf](aws/layers/frontend_hosting/main.tf) to read a `viewer_certificate.acm_certificate_arn` input — currently hardcoded to default cert).
+5. `terragrunt apply`.
+6. Create a CNAME / Alias record pointing your domain at the CloudFront distribution.
+
+### Cost estimate
+
+Within free tier for a small app:
+
+| Service | Free tier | Beyond free tier |
+|---|---|---|
+| S3 storage | 5 GB | $0.025/GB-month |
+| S3 requests | 20k GET / 2k PUT per month | negligible |
+| CloudFront egress | 1 TB/month **always free** | $0.085/GB |
+| CloudFront requests | 10M/month **always free** | $0.0075 per 10k |
+| CloudFront invalidations | 1,000 paths/month free | $0.005 per path |
+| ACM certificate | free (CloudFront only) | — |
+| Route 53 hosted zone | not free | $0.50/zone/month |
+| GitHub Actions | 2,000 min/month on private | $0.008/min |
+
+Expected monthly: **$0** for the first few thousand users. The biggest risk is invalidation cost if you redeploy 50+ times a day — the workflow uses `--paths /*` which counts as **one path** per invalidation, so this is fine.
+
+### Troubleshooting
+
+**Workflow fails on "configure-aws-credentials" with `Error: Could not assume role`**
+The OIDC trust policy didn't match. Common causes:
+- Pushing from a branch other than `staging` or `main`.
+- Repo name in [region.hcl](aws/accounts/stage/ap-southeast-1/region.hcl) `github_repo` doesn't match the actual repo (case-sensitive).
+- The IAM role's `assume_role_policy` is stale — `terragrunt apply` the layer.
+
+**Site loads but API calls return 404 / CORS errors**
+`NEXT_PUBLIC_API_URL` is empty or wrong. Update the GitHub Environment variable, push an empty commit to retrigger build.
+
+**Hard refresh on `/shops/123` returns 404 XML from S3**
+The SPA fallback rule on CloudFront isn't firing. Check the distribution's "Error pages" tab — should have rules for both 403 and 404 → `/index.html`. Re-apply [aws/layers/frontend_hosting](aws/layers/frontend_hosting/) if missing.
+
+**Stale content after deploy**
+CloudFront didn't invalidate, or the browser cached the old HTML. Check the workflow's "Invalidate CloudFront" step. Hard-refresh (Cmd+Shift+R / Ctrl+Shift+R).
+
+**Workflow says "No environment mapping for ref refs/heads/foo"**
+You pushed to a branch other than `staging` or `main`. Either rename the branch, or add it to the mapping in [.github/workflows/frontend-deploy.yml](.github/workflows/frontend-deploy.yml) **and** to `github_deploy_refs` in the corresponding env's [region.hcl](aws/accounts/stage/ap-southeast-1/region.hcl).
+
+**`terragrunt apply` fails with `BucketAlreadyExists` on the frontend bucket**
+S3 bucket names are **globally unique** across all AWS accounts. Edit `frontend_bucket_name` in [aws/accounts/stage/ap-southeast-1/region.hcl](aws/accounts/stage/ap-southeast-1/region.hcl) (and/or the prod one) — add a suffix like `-936146782254` or your initials. Re-run apply.
+
+**`next build` fails locally with "Page X is missing generateStaticParams"**
+A dynamic route (`[id]`) needs to know which IDs to pre-render. Either:
+- Add `export const dynamic = "force-dynamic"` (won't work with static export) — actually no, this fails too.
+- Add `generateStaticParams()` returning a list, even if empty: `export function generateStaticParams() { return []; }`. The route will render client-side via the SPA fallback.
+
+---
+
 ## Deferred to later phases
 
 Intentionally not in v1 (see [app_ideas.md §7](app_ideas.md)):
