@@ -2,6 +2,10 @@
 
 Infrastructure-as-code for deploying the reservation app to AWS. Adapted from the Elated Terraform baseline.
 
+> **Looking for deeper reference?** [DOCUMENTATION.md](DOCUMENTATION.md) covers the architecture,
+> layer-by-layer reference, configuration knobs, secrets-flow, operational runbook, security model,
+> cost breakdown, and troubleshooting. This README is the quick-start.
+
 ## What this provisions (stage / ap-southeast-1)
 
 - **VPC** (`10.244.0.0/20`) across 2 AZs with public, private, and database subnets; single NAT
