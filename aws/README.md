@@ -15,7 +15,7 @@ Infrastructure-as-code for deploying the reservation app to AWS. Adapted from th
   - `svc-ecs-reservation-stage-api` — Daphne ASGI on port 8000, internal ALB, health `/health/`
   - `svc-ecs-reservation-stage-celery-worker` — Celery worker (concurrency 4)
   - `svc-ecs-reservation-stage-celery-beat` — Celery beat scheduler
-- **RDS PostgreSQL 16.4** — `db.t4g.micro`, single-AZ, encrypted at rest, db `reservation`
+- **RDS PostgreSQL 17.4** — `db.t4g.micro`, single-AZ, encrypted at rest, db `reservation`
 - **ElastiCache Redis 7.1** — `cache.t3.micro`, TLS, used by Channels and Celery
 - **SSM Parameter Store** — DB/Redis connection params + app config from `parameters/env.yaml`
 - **S3** — private bucket for media uploads

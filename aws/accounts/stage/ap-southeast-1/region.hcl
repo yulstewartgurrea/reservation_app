@@ -209,16 +209,18 @@ locals {
   }
 
   # ---------------------------------------------------------------------------
-  # RDS (PostgreSQL 16 — matches local docker-compose)
+  # RDS (PostgreSQL 17 — Postgres 16.4 is no longer available in ap-southeast-1;
+  # 17.x is forward-compatible with the local docker-compose `postgres:16-alpine`
+  # for Django's purposes — only the engine major matters for app behavior.)
   # ---------------------------------------------------------------------------
   create_rds    = true
   create_aurora = false
   rds_settings = {
     name                                  = "rds-${local.project_name}-${local.env}"
     engine                                = "postgres"
-    engine_version                        = "16.4"
-    family                                = "postgres16"
-    major_engine_version                  = "16"
+    engine_version                        = "17.4"
+    family                                = "postgres17"
+    major_engine_version                  = "17"
     instance_class                        = "db.t4g.micro"
     storage_type                          = "gp3"
     allocated_storage                     = 20

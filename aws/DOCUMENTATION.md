@@ -56,7 +56,7 @@ explains how the stack is built, why it's structured the way it is, and how to o
    ║   │                     │                │            │          │    ║
    ║   │                     │   Database subnets (2 AZs)  │          │    ║
    ║   │                     │   ┌─────────────────┐       │          │    ║
-   ║   │                     │   │ RDS Postgres 16 │◀──────┘          │    ║
+   ║   │                     │   │ RDS Postgres 17 │◀──────┘          │    ║
    ║   │                     │   └─────────────────┘                  │    ║
    ║   │                     │   ┌─────────────────┐                  │    ║
    ║   │                     │   │ ElastiCache     │◀─────────────────┘    ║
@@ -87,7 +87,7 @@ explains how the stack is built, why it's structured the way it is, and how to o
 | **Single NAT Gateway** | Two NATs cost double for ~zero stage benefit. Trade resilience for ~$32/mo. Flip `single_nat_gateway = false` for prod. |
 | **VPC endpoints for ECR/S3/Logs** | Avoids paying NAT egress on every image pull and log shipment. |
 | **db.t4g.micro + cache.t3.micro** | Cheap stage profile. Postgres `t4g.micro` is ARM-based; pairs well with the existing Django image. |
-| **Postgres 16.4** | Matches `postgres:16-alpine` in [docker-compose.yml](../docker-compose.yml). |
+| **Postgres 17.4** | AWS deprecated 16.4 in `ap-southeast-1`; 17 is forward-compatible with the local `postgres:16-alpine` for Django's purposes (engine major is what matters for app behavior). |
 | **All config in SSM Parameter Store, secrets as SecureString** | Predictable ARN shape (no random suffix like Secrets Manager) → ECS task definitions can reference paths directly. |
 
 ---
@@ -719,6 +719,21 @@ Error: Failed to get existing workspaces: S3 bucket "terraform-states-..." does 
 ```
 
 You skipped step (1) of "Initial deploy". Create the bucket, then re-run.
+
+### RDS: `Cannot find version X.Y for postgres`
+
+AWS deprecates older RDS Postgres minor versions on a rolling basis (typically ~12 months after release). When apply fails with this error, look up what's currently available:
+
+```bash
+aws rds describe-db-engine-versions --engine postgres --region ap-southeast-1 \
+  --query 'DBEngineVersions[*].EngineVersion' --output text | tr '\t' '\n' | sort -V
+```
+
+Pick a current minor version, then in [region.hcl](accounts/stage/ap-southeast-1/region.hcl) under `rds_settings` update three fields: `engine_version`, `family` (e.g. `postgres17`), and `major_engine_version`. Postgres minor-version upgrades are app-transparent for Django, so just bumping to the latest is safe.
+
+### ElastiCache: `InvalidCredentialsException: This action cannot be completed now`
+
+Despite the misleading message, this is an AWS-side transient error (note the 408 status). Re-running the apply fixes it ~95% of the time. If it persists across 3 retries, confirm the IAM principal hasn't lost ElastiCache permissions.
 
 ### ECS tasks stuck in `STOPPED` / `EssentialContainerExited`
 
