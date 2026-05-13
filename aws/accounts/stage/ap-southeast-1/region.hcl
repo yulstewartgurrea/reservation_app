@@ -281,6 +281,9 @@ locals {
   # GitHub Environments allowed to deploy here. The workflow sets `environment: staging`,
   # so the OIDC token's sub claim becomes `repo:OWNER/REPO:environment:staging` — we match on that.
   github_environments = ["staging"]
+  # The OIDC provider for token.actions.githubusercontent.com already exists in this AWS account
+  # (likely from a previous project). Set to true on a fresh account where no provider exists.
+  create_oidc_provider = false
 
   # ---------------------------------------------------------------------------
   # Parameters & secrets (read from parameters/env.yaml)

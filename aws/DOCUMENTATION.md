@@ -851,7 +851,7 @@ push to main (touching backend/ or aws/)
 
 | File | What it is |
 |---|---|
-| [`.github/workflows/deploy-stage.yml`](../.github/workflows/deploy-stage.yml) | The pipeline definition |
+| [`.github/workflows/backend-deploy.yml`](../.github/workflows/backend-deploy.yml) | The pipeline definition |
 | [`.github/workflows/README.md`](../.github/workflows/README.md) | Workflow setup + rollback notes |
 | [`aws/layers/ci/`](layers/ci/) | Terraform: GitHub OIDC provider + deployer IAM role |
 | [`aws/accounts/stage/ap-southeast-1/ci/terragrunt.hcl`](accounts/stage/ap-southeast-1/ci/terragrunt.hcl) | Stage stub for the CI layer |
@@ -874,8 +874,9 @@ push to main (touching backend/ or aws/)
    - Settings → Environments → **New environment** → name it `staging`
      (Optional: add yourself as a required reviewer for click-to-deploy gates.)
    - Settings → Secrets and variables → Actions → **Variables** tab → New repository variable:
-     - Name: `AWS_DEPLOY_ROLE_ARN`
+     - Name: `AWS_BACKEND_DEPLOY_ROLE_ARN`
      - Value: the ARN from step 2
+     - (The frontend deploy workflow uses `AWS_DEPLOY_ROLE_ARN` — these are distinct variables.)
 
 4. **Push to `main`.** The workflow fires; first deploy takes ~6-8 min.
 
@@ -914,7 +915,7 @@ Merge a PR to `main`. Done.
 
 #### Redeploy / rollback
 
-GitHub UI → Actions → **Deploy stage** → Run workflow → enter a previous short SHA (e.g. `a1b2c3d4e5f6`) in the **image_tag** input. The build step skips (just verifies the tag exists in ECR), migrations run again, ECS rolls over.
+GitHub UI → Actions → **Backend deploy** → Run workflow → enter a previous short SHA (e.g. `a1b2c3d4e5f6`) in the **image_tag** input. The build step skips (just verifies the tag exists in ECR), migrations run again, ECS rolls over.
 
 ⚠️ Rolling back across schema migrations is not safe out of the box. If the rollback target's code can't read the current schema, you need to manually revert the migration first (`python manage.py migrate <app> <previous_migration>`) using an ECS exec or a one-off task.
 
@@ -946,7 +947,7 @@ API_IMAGE_TAG=$SHA terragrunt apply
 ### CI/CD troubleshooting
 
 **`Error: Could not assume role with OIDC`**
-- The `AWS_DEPLOY_ROLE_ARN` variable is missing, has a typo, or points to the wrong account.
+- The `AWS_BACKEND_DEPLOY_ROLE_ARN` variable is missing, has a typo, or points to the wrong account.
 - The workflow run isn't targeting the `staging` environment — check the job's `environment:` key.
 - The OIDC provider doesn't exist in the account — re-apply the `ci` layer.
 

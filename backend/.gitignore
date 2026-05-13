@@ -4,3 +4,8 @@ __pycache__/
 .env
 media/
 staticfiles/
+
+# Celery Beat runtime state — regenerated on every beat run
+celerybeat-schedule
+celerybeat-schedule.db
+celerybeat.pid

@@ -2,7 +2,8 @@
 
 | Workflow | Trigger | What it does |
 |---|---|---|
-| [`deploy-stage.yml`](deploy-stage.yml) | Push to `main` touching `backend/` or `aws/`; manual `workflow_dispatch` | Test → build & push image → run Django migrations as one-off ECS task → roll out ECS services |
+| [`backend-deploy.yml`](backend-deploy.yml) | Push to `staging` or `main` touching `backend/` or `aws/`; manual `workflow_dispatch` | Test → build & push image → run Django migrations as one-off ECS task → roll out ECS services |
+| [`frontend-deploy.yml`](frontend-deploy.yml) | (frontend workflow — separate scope) | — |
 
 The workflow assumes AWS via **GitHub OIDC** (no long-lived access keys). Setup is documented in
 [aws/DOCUMENTATION.md § "CI/CD"](../../aws/DOCUMENTATION.md#13-cicd-with-github-actions).
@@ -11,7 +12,7 @@ The workflow assumes AWS via **GitHub OIDC** (no long-lived access keys). Setup 
 
 Before the workflow can run, set these once in the GitHub repo:
 
-1. **Repository variable** `AWS_DEPLOY_ROLE_ARN` (Settings → Secrets and variables → Actions → Variables tab)
+1. **Repository variable** `AWS_BACKEND_DEPLOY_ROLE_ARN` (Settings → Secrets and variables → Actions → Variables tab)
    - Value: the `deployer_role_arn` output from the `ci` Terragrunt layer
    - Get it with:
      ```
@@ -38,7 +39,7 @@ verifies the tag exists in ECR and proceeds straight to migrate + deploy.
 You can dry-run the workflow logic locally with [`act`](https://github.com/nektos/act):
 
 ```bash
-act push -W .github/workflows/deploy-stage.yml --container-architecture linux/amd64
+act push -W .github/workflows/backend-deploy.yml --container-architecture linux/amd64
 ```
 
 But the AWS-touching steps require real OIDC tokens, which `act` can't produce — most useful for
