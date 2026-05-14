@@ -19,6 +19,7 @@ import {
 import { api } from "@/lib/api";
 import { formatApiError } from "@/lib/errors";
 import { FormField as Field, FormSection as Section } from "@/components/FormSection";
+import { LocationMap, geocodeAddress } from "@/components/LocationMap";
 import { SidebarCard } from "@/components/SidebarCard";
 import { Toast, ToastMessage } from "@/components/Toast";
 
@@ -130,7 +131,30 @@ export default function NewShopPage() {
     };
   }, [form]);
 
-  const hasPin = Boolean(form.address_line && form.city);
+  const canGeocode = Boolean(
+    form.address_line.trim() && form.city.trim() && form.country.trim()
+  );
+
+  async function geocodeFromAddress() {
+    const result = await geocodeAddress({
+      address_line: form.address_line,
+      city: form.city,
+      postal_code: form.postal_code,
+      country: form.country,
+    });
+    if (!result) {
+      setToast({
+        variant: "error",
+        message: "Couldn't find that address on the map. Try refining it.",
+      });
+      return;
+    }
+    setForm((prev) => ({
+      ...prev,
+      latitude: result.lat.toFixed(6),
+      longitude: result.lng.toFixed(6),
+    }));
+  }
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -332,7 +356,12 @@ export default function NewShopPage() {
                 </div>
               </div>
               <div className="lg:col-span-1">
-                <MapPreview hasPin={hasPin} />
+                <LocationMap
+                  lat={form.latitude}
+                  lng={form.longitude}
+                  canGeocode={canGeocode}
+                  onUseAddress={geocodeFromAddress}
+                />
               </div>
             </div>
           </Section>
@@ -555,48 +584,4 @@ function Select({
   );
 }
 
-/**
- * Lightweight map placeholder. We don't ship a real map embed (would pull a
- * tiles dependency); instead, show a stylized grid with a center pin and a
- * status line below it.
- */
-function MapPreview({ hasPin }: { hasPin: boolean }) {
-  return (
-    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-      <div
-        className="relative h-32 w-full bg-slate-100"
-        style={{
-          backgroundImage:
-            "linear-gradient(135deg, rgb(241 245 249) 25%, transparent 25%), linear-gradient(225deg, rgb(241 245 249) 25%, transparent 25%), linear-gradient(45deg, rgb(241 245 249) 25%, transparent 25%), linear-gradient(315deg, rgb(241 245 249) 25%, rgb(248 250 252) 25%)",
-          backgroundPosition: "10px 0, 10px 0, 0 0, 0 0",
-          backgroundSize: "20px 20px",
-          backgroundRepeat: "repeat",
-        }}
-      >
-        <div className="absolute inset-0 flex items-center justify-center">
-          <MapPin
-            size={32}
-            className={hasPin ? "text-brand-600" : "text-slate-300"}
-            strokeWidth={2.25}
-            fill={hasPin ? "currentColor" : "none"}
-          />
-        </div>
-      </div>
-      <div
-        className={`flex items-center gap-1.5 px-3 py-2 text-xs ${
-          hasPin ? "text-emerald-700" : "text-slate-500"
-        }`}
-      >
-        <span
-          className={`h-1.5 w-1.5 rounded-full ${
-            hasPin ? "bg-emerald-500" : "bg-slate-300"
-          }`}
-        />
-        {hasPin
-          ? "Pin updates when address is entered"
-          : "Enter an address to drop a pin"}
-      </div>
-    </div>
-  );
-}
 

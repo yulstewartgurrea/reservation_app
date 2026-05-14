@@ -4,6 +4,7 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
+  Building,
   Building2,
   ChevronDown,
   ChevronUp,
@@ -23,6 +24,8 @@ import { api } from "@/lib/api";
 import { formatApiError } from "@/lib/errors";
 import { ConfirmationDialog } from "@/components/ConfirmationDialog";
 import { FormField as Field, FormSection as Section } from "@/components/FormSection";
+import { geocodeAddress } from "@/components/LocationMap";
+import { LocationPicker, type PinResult } from "@/components/LocationPicker";
 import { PageHeader } from "@/components/PageHeader";
 import { Toast, ToastMessage } from "@/components/Toast";
 
@@ -30,9 +33,13 @@ type FormValues = {
   name: string;
   description: string;
   address_line: string;
+  address_line_2: string;
   city: string;
+  state_province: string;
+  barangay: string;
   postal_code: string;
   country: string;
+  landmark: string;
   phone: string;
   email: string;
   latitude: string;
@@ -71,9 +78,13 @@ function toFormValues(d: Partial<Shop>): FormValues {
     name: d.name ?? "",
     description: d.description ?? "",
     address_line: d.address_line ?? "",
+    address_line_2: d.address_line_2 ?? "",
     city: d.city ?? "",
+    state_province: d.state_province ?? "",
+    barangay: d.barangay ?? "",
     postal_code: d.postal_code ?? "",
     country: d.country ?? "",
+    landmark: d.landmark ?? "",
     phone: d.phone ?? "",
     email: d.email ?? "",
     latitude: d.latitude?.toString() ?? "",
@@ -243,8 +254,58 @@ export default function EditShopPage() {
     return <p className="py-10 text-center text-sm text-slate-500">Loading…</p>;
   }
 
-  const hasPin = Boolean(form.address_line && form.city);
+  const canGeocode = Boolean(
+    form.address_line.trim() && form.city.trim() && form.country.trim()
+  );
   const photoCount = shop.photos.length + staged.length;
+
+  async function geocodeFromAddress() {
+    if (!form) return;
+    const result = await geocodeAddress({
+      address_line: form.address_line,
+      city: form.city,
+      postal_code: form.postal_code,
+      country: form.country,
+    });
+    if (!result) {
+      setToast({
+        variant: "error",
+        message: "Couldn't find that address on the map. Try refining it.",
+      });
+      return;
+    }
+    setForm((prev) =>
+      prev
+        ? {
+            ...prev,
+            latitude: result.lat.toFixed(6),
+            longitude: result.lng.toFixed(6),
+          }
+        : prev
+    );
+  }
+
+  function applyPin(result: PinResult) {
+    setForm((prev) => {
+      if (!prev) return prev;
+      const a = result.address;
+      // Only fill empty fields — don't trample what the owner already typed.
+      const fillIfEmpty = (cur: string, candidate?: string) =>
+        cur.trim() || !candidate ? cur : candidate;
+      return {
+        ...prev,
+        latitude: result.lat.toFixed(6),
+        longitude: result.lng.toFixed(6),
+        address_line: fillIfEmpty(prev.address_line, a?.address_line),
+        city: fillIfEmpty(prev.city, a?.city),
+        state_province: fillIfEmpty(prev.state_province, a?.state_province),
+        barangay: fillIfEmpty(prev.barangay, a?.barangay),
+        postal_code: fillIfEmpty(prev.postal_code, a?.postal_code),
+        country: fillIfEmpty(prev.country, a?.country),
+      };
+    });
+    setToast({ variant: "success", message: "Coordinates updated from map pin." });
+  }
 
   const statusPill = (
     <span
@@ -451,59 +512,13 @@ export default function EditShopPage() {
           </Section>
 
           {/* 3. LOCATION */}
-          <Section
-            index={3}
-            icon={MapPin}
-            title="Location"
-            subtitle="Coordinates auto-fill when the address changes."
-          >
-            <div className="grid gap-4 lg:grid-cols-3">
-              <div className="space-y-4 lg:col-span-2">
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <Field label="Address" required>
-                    <input
-                      type="text"
-                      value={form.address_line}
-                      onChange={(e) => update("address_line", e.target.value)}
-                      required
-                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-                    />
-                  </Field>
-                  <Field label="City" required>
-                    <input
-                      type="text"
-                      value={form.city}
-                      onChange={(e) => update("city", e.target.value)}
-                      required
-                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-                    />
-                  </Field>
-                  <Field label="Postal code">
-                    <input
-                      type="text"
-                      value={form.postal_code}
-                      onChange={(e) => update("postal_code", e.target.value)}
-                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-                    />
-                  </Field>
-                  <Field label="Country" required>
-                    <Select
-                      value={form.country}
-                      onChange={(v) => update("country", v)}
-                      placeholder="Select country"
-                      options={[
-                        { value: "", label: "Select country", disabled: true },
-                        ...COUNTRIES.map((c) => ({ value: c, label: c })),
-                      ]}
-                    />
-                  </Field>
-                </div>
-              </div>
-              <div className="lg:col-span-1">
-                <MapPreview hasPin={hasPin} />
-              </div>
-            </div>
-          </Section>
+          <LocationFormSection
+            form={form}
+            update={update}
+            canGeocode={canGeocode}
+            geocodeFromAddress={geocodeFromAddress}
+            applyPin={applyPin}
+          />
 
           {/* 4. CONTACT */}
           <Section
@@ -691,46 +706,220 @@ function Select({
   );
 }
 
-/**
- * Same lightweight map placeholder as the new shop page — visual confirmation
- * that the address turned into a pin, no map tiles dependency.
- */
-function MapPreview({ hasPin }: { hasPin: boolean }) {
+const inputClasses =
+  "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500";
+
+/** Input with a leading icon in a small slot — used for the two address lines. */
+function IconInput({
+  icon: Icon,
+  value,
+  onChange,
+  placeholder,
+  required,
+  type = "text",
+}: {
+  icon: typeof MapPin;
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  required?: boolean;
+  type?: string;
+}) {
   return (
-    <div className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-      <div
-        className="relative h-32 w-full bg-slate-100"
-        style={{
-          backgroundImage:
-            "linear-gradient(135deg, rgb(241 245 249) 25%, transparent 25%), linear-gradient(225deg, rgb(241 245 249) 25%, transparent 25%), linear-gradient(45deg, rgb(241 245 249) 25%, transparent 25%), linear-gradient(315deg, rgb(241 245 249) 25%, rgb(248 250 252) 25%)",
-          backgroundPosition: "10px 0, 10px 0, 0 0, 0 0",
-          backgroundSize: "20px 20px",
-          backgroundRepeat: "repeat",
-        }}
-      >
-        <div className="absolute inset-0 flex items-center justify-center">
-          <MapPin
-            size={32}
-            className={hasPin ? "text-brand-600" : "text-slate-300"}
-            strokeWidth={2.25}
-            fill={hasPin ? "currentColor" : "none"}
-          />
-        </div>
-      </div>
-      <div
-        className={`flex items-center gap-1.5 px-3 py-2 text-xs ${
-          hasPin ? "text-emerald-700" : "text-slate-500"
-        }`}
-      >
-        <span
-          className={`h-1.5 w-1.5 rounded-full ${
-            hasPin ? "bg-emerald-500" : "bg-slate-300"
-          }`}
-        />
-        {hasPin
-          ? "Pin updates when address changes"
-          : "Enter an address to drop a pin"}
-      </div>
+    <div className="relative">
+      <Icon
+        size={16}
+        className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+      />
+      <input
+        type={type}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        required={required}
+        className={`${inputClasses} pl-9`}
+      />
     </div>
   );
 }
+
+/**
+ * Location section — title at the top, then a 2-column layout (form fields
+ * on the left, interactive map on the right). Matches the new mockup; uses
+ * the same rounded-2xl/border styling as the FormSection-based sections.
+ */
+function LocationFormSection({
+  form,
+  update,
+  canGeocode,
+  geocodeFromAddress,
+  applyPin,
+}: {
+  form: FormValues;
+  update: <K extends keyof FormValues>(k: K, v: FormValues[K]) => void;
+  canGeocode: boolean;
+  geocodeFromAddress: () => Promise<void>;
+  applyPin: (result: PinResult) => void;
+}) {
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6">
+      <div className="mb-5 flex items-start gap-4">
+        <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-600">
+          <MapPin size={18} />
+        </div>
+        <div>
+          <div className="font-semibold text-slate-900">
+            <span className="mr-1.5 text-slate-400">3.</span>
+            Location
+          </div>
+          <p className="mt-0.5 text-sm text-slate-500">
+            Add your shop&rsquo;s address details so customers can find you easily.
+          </p>
+        </div>
+      </div>
+
+      <div className="grid gap-6 lg:grid-cols-2">
+        {/* LEFT: address fields */}
+        <div className="space-y-4">
+          <Field label="Address line 1" required>
+            <IconInput
+              icon={MapPin}
+              value={form.address_line}
+              onChange={(v) => update("address_line", v)}
+              placeholder="e.g. 8572 Winding Creek Boulevard"
+              required
+            />
+          </Field>
+          <Field label="Address line 2">
+            <IconInput
+              icon={Building}
+              value={form.address_line_2}
+              onChange={(v) => update("address_line_2", v)}
+              placeholder="Apartment, suite, building, floor, etc. (optional)"
+            />
+          </Field>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Country" required>
+              <Select
+                value={form.country}
+                onChange={(v) => update("country", v)}
+                placeholder="Select country"
+                options={[
+                  { value: "", label: "Select country", disabled: true },
+                  ...COUNTRIES.map((c) => ({ value: c, label: c })),
+                ]}
+              />
+            </Field>
+            <Field label="State / Province" required>
+              <input
+                type="text"
+                value={form.state_province}
+                onChange={(e) => update("state_province", e.target.value)}
+                placeholder="e.g. Metro Manila"
+                required
+                className={inputClasses}
+              />
+            </Field>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="City / Municipality" required>
+              <input
+                type="text"
+                value={form.city}
+                onChange={(e) => update("city", e.target.value)}
+                placeholder="e.g. Iligan"
+                required
+                className={inputClasses}
+              />
+            </Field>
+            <Field label="Barangay / District">
+              <input
+                type="text"
+                value={form.barangay}
+                onChange={(e) => update("barangay", e.target.value)}
+                placeholder="e.g. Pala-o"
+                className={inputClasses}
+              />
+            </Field>
+          </div>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="ZIP / Postal Code" required>
+              <input
+                type="text"
+                value={form.postal_code}
+                onChange={(e) => update("postal_code", e.target.value)}
+                placeholder="e.g. 9200"
+                required
+                className={inputClasses}
+              />
+            </Field>
+            <Field label="Landmark">
+              <input
+                type="text"
+                value={form.landmark}
+                onChange={(e) => update("landmark", e.target.value)}
+                placeholder="Nearby landmark (optional)"
+                className={inputClasses}
+              />
+            </Field>
+          </div>
+
+          <div>
+            <div className="mb-1 flex items-center justify-between">
+              <span className="block text-sm font-medium text-slate-700">
+                Coordinates{" "}
+                <span className="font-normal text-slate-500">(optional)</span>
+              </span>
+              <button
+                type="button"
+                onClick={geocodeFromAddress}
+                disabled={!canGeocode}
+                className="text-xs font-medium text-brand-600 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                Use address coordinates
+              </button>
+            </div>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="Latitude">
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={form.latitude}
+                  onChange={(e) => update("latitude", e.target.value)}
+                  placeholder="e.g. 8.2414"
+                  className={inputClasses}
+                />
+              </Field>
+              <Field label="Longitude">
+                <input
+                  type="text"
+                  inputMode="decimal"
+                  value={form.longitude}
+                  onChange={(e) => update("longitude", e.target.value)}
+                  placeholder="e.g. 124.2470"
+                  className={inputClasses}
+                />
+              </Field>
+            </div>
+            <p className="mt-1.5 text-xs text-slate-500">
+              Leave blank to auto-capture from the map pin.
+            </p>
+          </div>
+        </div>
+
+        {/* RIGHT: interactive map */}
+        <div className="lg:sticky lg:top-4 lg:self-start">
+          <LocationPicker
+            lat={form.latitude}
+            lng={form.longitude}
+            onApplyPin={applyPin}
+          />
+        </div>
+      </div>
+    </section>
+  );
+}
+

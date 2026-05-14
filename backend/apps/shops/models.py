@@ -30,9 +30,13 @@ class Shop(models.Model):
     categories = models.ManyToManyField(ShopCategory, blank=True, related_name="shops")
 
     address_line = models.CharField(max_length=255)
+    address_line_2 = models.CharField(max_length=255, blank=True)
     city = models.CharField(max_length=100)
+    state_province = models.CharField(max_length=100, blank=True)
+    barangay = models.CharField(max_length=100, blank=True)
     postal_code = models.CharField(max_length=20, blank=True)
     country = models.CharField(max_length=64, default="")
+    landmark = models.CharField(max_length=255, blank=True)
     latitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
     longitude = models.DecimalField(max_digits=9, decimal_places=6, null=True, blank=True)
 

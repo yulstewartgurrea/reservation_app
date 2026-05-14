@@ -32,6 +32,9 @@ type Shop = {
   country: string;
   phone: string;
   email: string;
+  // DRF serializes DecimalField as a string by default — accept both.
+  latitude: string | number | null;
+  longitude: string | number | null;
   status: "active" | "paused" | "pending";
   cancellation_window_hours: number | null;
   photos: { id: number; image: string; caption: string }[];
@@ -308,6 +311,14 @@ export default function ShopDetailPage() {
               }
             />
           </dl>
+
+          <ShopLocationMap
+            latitude={shop.latitude}
+            longitude={shop.longitude}
+            label={[shop.address_line, shop.city, shop.country]
+              .filter(Boolean)
+              .join(", ")}
+          />
         </section>
 
         <section className="rounded-2xl border border-slate-200 bg-white p-5">
@@ -410,6 +421,55 @@ function InfoRow({
     <div className="flex items-start gap-3 text-sm">
       <Icon size={16} className="mt-0.5 flex-shrink-0 text-slate-400" />
       <div className="text-slate-700">{value}</div>
+    </div>
+  );
+}
+
+/**
+ * Embeds a Google Maps view of the shop's pin. Uses the keyless
+ * `maps.google.com/maps?output=embed` endpoint — no API key, no billing — so
+ * we don't pull in the Maps JS SDK. Falls back to an address-only hint when
+ * the shop hasn't set coordinates yet.
+ */
+function ShopLocationMap({
+  latitude,
+  longitude,
+  label,
+}: {
+  latitude: string | number | null;
+  longitude: string | number | null;
+  label: string;
+}) {
+  const hasPin = latitude != null && longitude != null;
+  if (!hasPin) {
+    if (!label) return null;
+    return (
+      <div className="mt-4 rounded-lg border border-dashed border-slate-200 bg-slate-50 p-3 text-xs text-slate-500">
+        Map will appear once this shop sets its location.
+      </div>
+    );
+  }
+  const embedSrc = `https://maps.google.com/maps?q=${latitude},${longitude}&z=15&output=embed`;
+  const directionsUrl = `https://www.google.com/maps/dir/?api=1&destination=${latitude},${longitude}`;
+  return (
+    <div className="mt-4">
+      <div className="overflow-hidden rounded-lg border border-slate-200">
+        <iframe
+          title={`Map of ${label || "shop"}`}
+          src={embedSrc}
+          className="aspect-[16/9] w-full border-0"
+          loading="lazy"
+          referrerPolicy="no-referrer-when-downgrade"
+        />
+      </div>
+      <a
+        href={directionsUrl}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="mt-2 inline-flex items-center gap-1.5 text-xs font-medium text-brand-600 hover:text-brand-700"
+      >
+        Get directions on Google Maps →
+      </a>
     </div>
   );
 }
