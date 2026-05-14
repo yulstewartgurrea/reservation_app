@@ -12,6 +12,17 @@ locals {
   account_id  = local.global_vars.stage_account_id
 
   # ---------------------------------------------------------------------------
+  # SES (transactional email — signup OTPs, password resets, booking emails)
+  # ---------------------------------------------------------------------------
+  # While in SES sandbox (the default until you request production access),
+  # this address is both the only sender AND one of the only recipients you can
+  # send to. Add more recipients to `additional_verified_emails` for testing.
+  verified_email             = "yulgurz@gmail.com"
+  additional_verified_emails = []
+  from_email_display         = "Reserva <yulgurz@gmail.com>"
+  write_smtp_creds_to_ssm    = true
+
+  # ---------------------------------------------------------------------------
   # VPC
   # ---------------------------------------------------------------------------
   cidr                     = "10.244.0.0/20"
@@ -92,13 +103,16 @@ locals {
     { name = "STRIKE_LIMIT", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/STRIKE_LIMIT" },
     { name = "STRIKE_WINDOW_DAYS", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/STRIKE_WINDOW_DAYS" },
 
-    { name = "EMAIL_BACKEND", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/EMAIL_BACKEND" },
-    { name = "EMAIL_HOST", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/EMAIL_HOST" },
-    { name = "EMAIL_PORT", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/EMAIL_PORT" },
-    { name = "EMAIL_HOST_USER", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/EMAIL_HOST_USER" },
-    { name = "EMAIL_HOST_PASSWORD", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/EMAIL_HOST_PASSWORD" },
-    { name = "EMAIL_USE_TLS", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/EMAIL_USE_TLS" },
-    { name = "DEFAULT_FROM_EMAIL", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/DEFAULT_FROM_EMAIL" },
+    # Email — created and populated by the `ses` layer at /reservation/<env>/ses/*.
+    # Apply the ses layer BEFORE re-applying ecs after a fresh checkout (otherwise
+    # the task definition will fail to resolve these secrets).
+    { name = "EMAIL_BACKEND", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/email_backend" },
+    { name = "EMAIL_HOST", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/smtp_host" },
+    { name = "EMAIL_PORT", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/smtp_port" },
+    { name = "EMAIL_HOST_USER", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/smtp_username" },
+    { name = "EMAIL_HOST_PASSWORD", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/smtp_password" },
+    { name = "EMAIL_USE_TLS", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/email_use_tls" },
+    { name = "DEFAULT_FROM_EMAIL", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/default_from_email" },
 
     { name = "PAYMONGO_SECRET_KEY", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/PAYMONGO_SECRET_KEY" },
     { name = "PAYMONGO_PUBLIC_KEY", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/PAYMONGO_PUBLIC_KEY" },

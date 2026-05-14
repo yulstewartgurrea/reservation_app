@@ -12,6 +12,11 @@ locals {
   # accounts_dir = aws/accounts and aws_root = aws.
   accounts_dir = dirname(find_in_parent_folders("terragrunt_base.hcl"))
   aws_root     = "${local.accounts_dir}/.."
+
+  # In CI we authenticate via OIDC (env-var credentials), not a named profile.
+  # Local dev uses ~/.aws/credentials with the profile_name from account.hcl.
+  in_ci         = get_env("CI", "") != ""
+  resolved_profile = local.in_ci ? null : try(local.account_vars.profile_name, null)
 }
 
 generate "versions" {
@@ -39,7 +44,7 @@ remote_state {
     region  = local.region
     key     = format("%s/terraform.tfstate", path_relative_to_include())
     bucket  = format("terraform-states-%s-%s", local.account_vars.account_id, local.region_vars.aws_region)
-    profile = can(local.account_vars.profile_name) ? local.account_vars.profile_name : null
+    profile = local.resolved_profile
   }
   generate = {
     path      = "_backend.tf"
@@ -53,6 +58,9 @@ inputs = merge(
   local.global_vars,
   local.account_vars,
   local.region_vars,
+  # In CI, blank out profile_name so providers.tf falls back to env-var credentials
+  # (OIDC). Local dev keeps the named profile from account.hcl.
+  local.in_ci ? { profile_name = "" } : {},
   {
     common_tags = {
       project         = local.region_vars.project_name
