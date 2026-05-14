@@ -71,6 +71,36 @@ resource "aws_cloudfront_origin_access_control" "frontend" {
   signing_protocol                  = "sigv4"
 }
 
+locals {
+  has_backend       = var.backend_alb_arn != "" && var.backend_alb_dns_name != ""
+  backend_origin_id = "alb-backend-${var.env}"
+
+  # Managed cache/origin-request policy IDs (global, stable).
+  managed_caching_disabled_policy_id  = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+  managed_caching_optimized_policy_id = "658327ea-f89d-4fab-a63d-7e88639e58f6"
+  managed_all_viewer_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3"
+}
+
+# CloudFront VPC Origin — gives the distribution a route into the VPC so it can
+# reach the internal ALB without ever making the ALB internet-facing. Requires
+# AWS provider ≥ 5.74 (see versions_override.tf).
+resource "aws_cloudfront_vpc_origin" "backend" {
+  count = local.has_backend ? 1 : 0
+
+  vpc_origin_endpoint_config {
+    name                   = "vpc-origin-${var.project_name}-${var.env}-api"
+    arn                    = var.backend_alb_arn
+    http_port              = 80
+    https_port             = 443
+    origin_protocol_policy = "http-only"
+
+    origin_ssl_protocols {
+      items    = ["TLSv1.2"]
+      quantity = 1
+    }
+  }
+}
+
 resource "aws_cloudfront_distribution" "frontend" {
   enabled             = true
   is_ipv6_enabled     = true
@@ -86,6 +116,20 @@ resource "aws_cloudfront_distribution" "frontend" {
     origin_access_control_id = aws_cloudfront_origin_access_control.frontend.id
   }
 
+  # Backend ALB origin (private, via VPC Origin). Only added when the ecs layer
+  # has been applied and exported its ALB info.
+  dynamic "origin" {
+    for_each = local.has_backend ? [1] : []
+    content {
+      domain_name = var.backend_alb_dns_name
+      origin_id   = local.backend_origin_id
+
+      vpc_origin_config {
+        vpc_origin_id = aws_cloudfront_vpc_origin.backend[0].id
+      }
+    }
+  }
+
   default_cache_behavior {
     target_origin_id       = "s3-${local.bucket_name}"
     viewer_protocol_policy = "redirect-to-https"
@@ -94,7 +138,40 @@ resource "aws_cloudfront_distribution" "frontend" {
     compress               = true
 
     # AWS-managed "CachingOptimized" policy — handles GET caching with sensible defaults.
-    cache_policy_id = "658327ea-f89d-4fab-a63d-7e88639e58f6"
+    cache_policy_id = local.managed_caching_optimized_policy_id
+  }
+
+  # /api/* → Django HTTP. No caching (responses are user-specific / dynamic);
+  # forward all headers, cookies, query strings via the AllViewer managed policy
+  # so JWT auth, CSRF, and DRF content negotiation work end-to-end.
+  dynamic "ordered_cache_behavior" {
+    for_each = local.has_backend ? [1] : []
+    content {
+      path_pattern             = var.backend_api_path_pattern
+      target_origin_id         = local.backend_origin_id
+      viewer_protocol_policy   = "redirect-to-https"
+      allowed_methods          = ["GET", "HEAD", "OPTIONS", "PUT", "POST", "PATCH", "DELETE"]
+      cached_methods           = ["GET", "HEAD"]
+      compress                 = true
+      cache_policy_id          = local.managed_caching_disabled_policy_id
+      origin_request_policy_id = local.managed_all_viewer_request_policy_id
+    }
+  }
+
+  # /ws/* → Django Channels WebSocket. CloudFront supports the HTTP→WS upgrade
+  # natively; same origin policy as /api/*.
+  dynamic "ordered_cache_behavior" {
+    for_each = local.has_backend ? [1] : []
+    content {
+      path_pattern             = var.backend_ws_path_pattern
+      target_origin_id         = local.backend_origin_id
+      viewer_protocol_policy   = "redirect-to-https"
+      allowed_methods          = ["GET", "HEAD", "OPTIONS"]
+      cached_methods           = ["GET", "HEAD"]
+      compress                 = false
+      cache_policy_id          = local.managed_caching_disabled_policy_id
+      origin_request_policy_id = local.managed_all_viewer_request_policy_id
+    }
   }
 
   # SPA-style fallback: Next.js static export emits per-route .html files, but client-side

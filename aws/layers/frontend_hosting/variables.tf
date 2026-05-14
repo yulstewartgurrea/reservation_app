@@ -41,3 +41,32 @@ variable "github_oidc_provider_arn" {
   type        = string
   default     = ""
 }
+
+# ---------------------------------------------------------------------------
+# Backend routing (CloudFront → internal ALB via VPC Origin).
+# When backend_alb_arn is empty, no API behaviors are created — useful for the
+# first apply, before the ecs layer exists.
+# ---------------------------------------------------------------------------
+variable "backend_alb_arn" {
+  description = "ARN of the internal ALB serving the API. Empty disables /api/* routing."
+  type        = string
+  default     = ""
+}
+
+variable "backend_alb_dns_name" {
+  description = "DNS name of the internal ALB (used as CloudFront origin domain)."
+  type        = string
+  default     = ""
+}
+
+variable "backend_api_path_pattern" {
+  description = "CloudFront path pattern routed to the backend (HTTP API)."
+  type        = string
+  default     = "/api/*"
+}
+
+variable "backend_ws_path_pattern" {
+  description = "CloudFront path pattern routed to the backend (WebSocket)."
+  type        = string
+  default     = "/ws/*"
+}

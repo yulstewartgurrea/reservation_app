@@ -40,6 +40,36 @@ docker compose exec web python manage.py createsuperuser
 | Postgres    | localhost:5432                                          | user/pw: `postgres`/`postgres`          |
 | Redis       | localhost:6379                                          | broker + channel layer + cache          |
 
+### Deployed environments (AWS, ap-southeast-1)
+
+| Service  | Staging URL | Status |
+|----------|-------------|--------|
+| Frontend | https://dx1epgde94eqq.cloudfront.net | Public — CloudFront fronts the `s3-reservation-stage-frontend` bucket; populated by [.github/workflows/frontend-deploy.yml](.github/workflows/frontend-deploy.yml) |
+| Backend (HTTP) | https://dx1epgde94eqq.cloudfront.net/api/ | Public via CloudFront `/api/*` behavior → CloudFront VPC Origin → internal ALB → ECS. The ALB stays private. |
+| Backend (WebSocket) | wss://dx1epgde94eqq.cloudfront.net/ws/ | Same path via the `/ws/*` behavior; Channels notifications work. |
+| Backend ALB (private) | `internal-lb-reservation-stage-internal-1637615331.ap-southeast-1.elb.amazonaws.com` | Internal-only, not reachable from outside the VPC. Wired up by the [ecs layer](aws/layers/ecs/). |
+
+**Routing architecture:**
+
+```
+Browser ──HTTPS──▶  CloudFront (dx1epgde94eqq.cloudfront.net)
+                        │
+                        ├─ default behavior ─▶ S3 (static Next.js export)
+                        ├─ /api/*           ─▶ VPC Origin ─▶ internal ALB ─▶ ECS Django
+                        └─ /ws/*            ─▶ VPC Origin ─▶ internal ALB ─▶ ECS Channels
+```
+
+Single origin (`dx1epgde94eqq.cloudfront.net`) → no CORS, single HTTPS surface, backend ALB never gets a public IP. Set up in [aws/layers/frontend_hosting/main.tf](aws/layers/frontend_hosting/main.tf) via `aws_cloudfront_vpc_origin` (AWS provider ≥ 5.74).
+
+**Frontend env var:** `NEXT_PUBLIC_API_URL = https://dx1epgde94eqq.cloudfront.net/api` in the `staging` GitHub Environment.
+
+Find your own URLs anytime with:
+
+```bash
+AWS_PROFILE=reservation-stage aws cloudfront list-distributions --query "DistributionList.Items[*].[Id,DomainName]" --output table
+AWS_PROFILE=reservation-stage aws elbv2 describe-load-balancers --region ap-southeast-1 --query "LoadBalancers[*].[LoadBalancerName,DNSName,Scheme]" --output table
+```
+
 ---
 
 ## Docker services
@@ -816,6 +846,18 @@ Your IAM user is missing IAM/CloudFront management permissions. See the "Prerequ
 **Workflow fails with `Invalid bucket name "...\n"` or similar in the `aws s3 sync` step**
 A GitHub Environment variable has a stray newline or trailing whitespace — copy-pasting a value with a newline into the GitHub UI preserves it. Re-edit the variable (Settings → Environments → staging → Variables → pencil icon) and re-enter without the trailing newline. The workflow strips whitespace defensively (see [.github/workflows/frontend-deploy.yml](.github/workflows/frontend-deploy.yml)), so this only bites if you paste with a newline AND the strip somehow fails.
 
+**Frontend at `https://dx1epgde94eqq.cloudfront.net` loads, but every API call returns 404 / 502 / `NetworkError`**
+The CloudFront `/api/*` (or `/ws/*`) behavior is missing, the VPC origin isn't deployed yet, or `NEXT_PUBLIC_API_URL` was wrong at build time. Check, in order:
+1. `aws cloudfront get-distribution --id <id> --query 'Distribution.DistributionConfig.CacheBehaviors'` — should list a behavior with `PathPattern: /api/*` and an `OriginId` matching the VPC origin.
+2. `aws cloudfront list-vpc-origins` — should show one `Deployed` VPC origin pointing at the internal ALB ARN. CloudFront update propagation takes 5–15 min after `terragrunt apply`; the API call returns immediately but the distribution status will be `InProgress` for a while. Check `aws cloudfront get-distribution --id <id> --query 'Distribution.Status'` — wait for `Deployed`.
+3. View source on the deployed page and grep for the API URL — Next.js bakes `NEXT_PUBLIC_*` at build time. If it still says `localhost:8000`, the GitHub Environment variable wasn't set before the last frontend build; fix it in **Settings → Environments → staging → Variables → `NEXT_PUBLIC_API_URL`**, then re-run the frontend-deploy workflow.
+
+**`terragrunt apply` on `frontend_hosting` fails with `Error: Unsupported argument` for `vpc_origin_config` or `aws_cloudfront_vpc_origin` resource not found**
+The AWS terraform provider in this layer is older than 5.74. `aws_cloudfront_vpc_origin` and the `origin.vpc_origin_config` block were added in provider 5.74 (Nov 2024). Fix: bump `version = ">= 5.74"` in [aws/accounts/_common/versions_override.tf](aws/accounts/_common/versions_override.tf) and run `terragrunt init -upgrade` in the layer before re-applying.
+
+**Django returns `DisallowedHost at /api/...` or `400 Bad Request: Invalid HTTP_HOST header` when called through CloudFront**
+CloudFront's "AllViewer" origin-request policy forwards the viewer's `Host` header (`dx1epgde94eqq.cloudfront.net`) to the origin. Django's `ALLOWED_HOSTS` must contain it. Quick fix: keep `DJANGO_ALLOWED_HOSTS = "*"` for staging (already the case in [parameters/env.yaml](aws/accounts/stage/ap-southeast-1/parameters/env.yaml)). For prod, add the explicit hostnames. After updating the SSM param, re-run the backend-deploy workflow to roll new task defs.
+
 **`terragrunt apply` in CI fails with `AccessDenied ... s3:PutEncryptionConfiguration` (or `s3:PutBucketPolicy`) on the state bucket**
 Terragrunt re-checks the remote-state bucket's settings (SSE, root-access policy, enforced TLS) every run and tries to update if they differ from its expected values. The state bucket was bootstrapped once with the admin profile, and the CI deploy role only has state read/write perms — not bucket-management perms. Fix: [terragrunt_base.hcl](aws/accounts/terragrunt_base.hcl) sets `skip_bucket_ssencryption = true`, `skip_bucket_root_access = true`, `skip_bucket_enforced_tls = true` so terragrunt trusts the existing settings instead of trying to enforce them. If you need to legitimately change those settings, do it once from local with the admin profile.
 
@@ -840,6 +882,37 @@ Importing `next/constants` from `next.config.mjs` works locally (CommonJS resolu
 
 **`next dev` fails locally with "Page X is missing generateStaticParams" when visiting a real ID like `/shops/1`**
 You set `output: "export"` unconditionally and `next dev` is now rejecting any non-placeholder ID. Fix: make the `output: export` setting conditional on the build phase so dev mode keeps server-rendering — see [frontend/next.config.mjs](frontend/next.config.mjs) (it checks `phase === "phase-development-server"`).
+
+**Signup / `/api/auth/request-otp/` returns 200 but the OTP never arrives in the inbox**
+Two layered traps:
+
+1. **`EMAIL_BACKEND=console` is the dev default** — the OTP is rendered as a full email but printed to `docker compose logs web` instead of being sent over SMTP. The API still returns success. To see the code, tail the web container:
+   ```bash
+   docker compose logs -f web | grep -A40 "verification code"
+   ```
+   To send real mail from local dev instead, follow [Recipe B (AWS SES)](#recipe-b--aws-ses-production) — or pull the SES creds straight out of SSM:
+   ```bash
+   aws ssm get-parameter --name /reservation/stage/ses/smtp_username --with-decryption \
+     --region ap-southeast-1 --profile reservation-stage --query 'Parameter.Value' --output text
+   aws ssm get-parameter --name /reservation/stage/ses/smtp_password --with-decryption \
+     --region ap-southeast-1 --profile reservation-stage --query 'Parameter.Value' --output text
+   ```
+   Paste them into `backend/.env`'s `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD`, set `EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend` + `EMAIL_HOST=email-smtp.ap-southeast-1.amazonaws.com`, then `docker compose restart web worker`.
+
+2. **Email failures are intentionally silent.** `apps/core/emails.py:send_template_email` catches all exceptions and logs a `warning` instead of raising, and `RegisterView.perform_create` further swallows that with `pass` so a broken mailer doesn't block signups. If the OTP isn't landing even on SMTP, check the warning log:
+   ```bash
+   docker compose logs web worker | grep -i 'send_template_email failed\|smtp'
+   ```
+   Common causes: still in SES sandbox + recipient not verified (`MessageRejected: Email address is not verified`), wrong region in `EMAIL_HOST` (each SES region has a different SMTP endpoint), or a `From:` address that isn't the verified sender.
+
+3. **`request-otp/` never reveals whether the email exists.** It always returns `{"detail": "If that email exists, a code has been sent."}` to avoid account enumeration. If you call it with an unregistered email, you get a 200 but nothing happens. Register first.
+
+**`docker compose up` fails with `Bind for 0.0.0.0:8000 failed: port is already allocated`**
+Something else on the host is holding port 8000. Find and stop it:
+```bash
+lsof -nP -iTCP:8000 -sTCP:LISTEN
+```
+Common culprits: a previous `web` container that never shut cleanly (`docker rm -f reservationapp-web-1`); an orphaned compose project from running `docker compose up` inside `backend/` instead of the repo root (`docker compose -p backend down`); an unrelated host process such as a stray `uvicorn`/`runserver` you started by hand. If the host process is something you want to keep running, remap the host side of the port in [docker-compose.yml](docker-compose.yml) (`"8001:8000"`) and update `CORS_ALLOWED_ORIGINS` + the frontend's `NEXT_PUBLIC_API_URL` to match.
 
 **Backend deploy fails in the `migrate` job with `Invalid type for parameter containerDefinitions[0].entryPoint, value: None, type: <class 'NoneType'>, valid types: <class 'list'>, <class 'tuple'>`**
 The migrate job clones the API task definition and tries to clear `entryPoint` so its own `command = ["sh","-c","python manage.py migrate ..."]` runs cleanly (the API task def sets `entrypoint = ["sh","-c"]` in [region.hcl](aws/accounts/stage/ap-southeast-1/region.hcl), which would otherwise produce `sh -c sh -c "..."`). Setting `.entryPoint = null` in jq produces `"entryPoint": null` in the JSON, and botocore rejects it client-side before the API call — the field must be a list or omitted entirely. Fix: use `del(.entryPoint)` in the jq filter (see [.github/workflows/backend-deploy.yml](.github/workflows/backend-deploy.yml)).

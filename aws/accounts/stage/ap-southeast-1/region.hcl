@@ -97,6 +97,7 @@ locals {
     { name = "DJANGO_DEBUG", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/DJANGO_DEBUG" },
     { name = "DJANGO_ALLOWED_HOSTS", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/DJANGO_ALLOWED_HOSTS" },
     { name = "CORS_ALLOWED_ORIGINS", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/CORS_ALLOWED_ORIGINS" },
+    { name = "FRONTEND_URL", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/FRONTEND_URL" },
 
     { name = "DEFAULT_COMMISSION_RATE", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/DEFAULT_COMMISSION_RATE" },
     { name = "DEFAULT_CANCELLATION_WINDOW_HOURS", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/DEFAULT_CANCELLATION_WINDOW_HOURS" },
