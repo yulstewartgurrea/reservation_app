@@ -61,7 +61,7 @@ Browser ──HTTPS──▶  CloudFront (dx1epgde94eqq.cloudfront.net)
 
 Single origin (`dx1epgde94eqq.cloudfront.net`) → no CORS, single HTTPS surface, backend ALB never gets a public IP. Set up in [aws/layers/frontend_hosting/main.tf](aws/layers/frontend_hosting/main.tf) via `aws_cloudfront_vpc_origin` (AWS provider ≥ 5.74).
 
-**Frontend env var:** `NEXT_PUBLIC_API_URL = https://dx1epgde94eqq.cloudfront.net/api` in the `staging` GitHub Environment.
+**Frontend env var:** `NEXT_PUBLIC_API_URL = https://dx1epgde94eqq.cloudfront.net` (origin only, no `/api` suffix) in the `staging` GitHub Environment — [frontend/src/lib/api.ts](frontend/src/lib/api.ts) appends `/api` internally, so including it in the env var produces `/api/api/...` and breaks every call.
 
 Find your own URLs anytime with:
 
@@ -845,6 +845,21 @@ Your IAM user is missing IAM/CloudFront management permissions. See the "Prerequ
 
 **Workflow fails with `Invalid bucket name "...\n"` or similar in the `aws s3 sync` step**
 A GitHub Environment variable has a stray newline or trailing whitespace — copy-pasting a value with a newline into the GitHub UI preserves it. Re-edit the variable (Settings → Environments → staging → Variables → pencil icon) and re-enter without the trailing newline. The workflow strips whitespace defensively (see [.github/workflows/frontend-deploy.yml](.github/workflows/frontend-deploy.yml)), so this only bites if you paste with a newline AND the strip somehow fails.
+
+**`terragrunt apply` fails with `InvalidPermission.Duplicate: the specified rule ... already exists` on a security group rule**
+You (or a previous run) created the rule manually via the AWS Console / CLI before adding it to Terraform. AWS rejects the duplicate; Terraform has no state for it. Fix: import the existing rule into Terraform state, then re-apply. The resource address depends on the module path — for the internal ALB's CloudFront prefix-list ingress, that's:
+```bash
+AWS_PROFILE=reservation-stage terragrunt import \
+  'module.alb_internal["svc-ecs-reservation-stage-api"].aws_vpc_security_group_ingress_rule.this["ingress_cloudfront_origin_facing"]' \
+  <sgr-XXXXXXXX>   # the security-group-rule ID from `aws ec2 describe-security-group-rules`
+```
+Single-quote the address (zsh expands `[...]`). Re-apply afterward — expect "0 changes".
+
+**Requests hit `/api/api/<path>` (doubled prefix) and 404 / 504**
+The frontend axios client in [frontend/src/lib/api.ts](frontend/src/lib/api.ts) sets `baseURL = ${NEXT_PUBLIC_API_URL}/api` — it appends `/api` itself. If you also include `/api` in the env var (e.g. `NEXT_PUBLIC_API_URL=https://....cloudfront.net/api`), you end up with `/api/api/...`. Fix: `NEXT_PUBLIC_API_URL` must be the **origin only** (no path), e.g. `https://dx1epgde94eqq.cloudfront.net`. Update **Settings → Environments → staging → Variables** and re-run the frontend-deploy workflow — Next.js bakes `NEXT_PUBLIC_*` at build time, so changing the var alone does nothing.
+
+**Every request to `https://<distribution>.cloudfront.net/api/...` returns `504 Gateway Timeout` (CloudFront HTML error page) after exactly ~30s**
+The internal ALB's security group only allows the VPC CIDR, but CloudFront VPC Origin requests reach the ALB sourced from the AWS-managed prefix list `com.amazonaws.global.cloudfront.origin-facing` — NOT from the VPC origin ENI's private IP, even though the ENI lives in your VPC. With no matching ingress rule, the ALB silently drops the connection and CloudFront returns 504 after its 30s origin timeout. Fix: allow that prefix list inbound on the ALB security group. Codified in [aws/layers/ecs/main.tf](aws/layers/ecs/main.tf) via a `data "aws_ec2_managed_prefix_list" "cloudfront_origin_facing"` lookup + `ingress_cloudfront_origin_facing` rule on `module.alb_internal`. Verify success with `curl -i https://<dist>.cloudfront.net/api/` → expect `200` in ~1–2s instead of `504` after 30s.
 
 **Frontend at `https://dx1epgde94eqq.cloudfront.net` loads, but every API call returns 404 / 502 / `NetworkError`**
 The CloudFront `/api/*` (or `/ws/*`) behavior is missing, the VPC origin isn't deployed yet, or `NEXT_PUBLIC_API_URL` was wrong at build time. Check, in order:
