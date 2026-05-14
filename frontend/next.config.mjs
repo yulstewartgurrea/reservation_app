@@ -12,3 +12,4 @@ export default function config(phase) {
     images: { unoptimized: true },
   };
 }
+// trigger redeploy
