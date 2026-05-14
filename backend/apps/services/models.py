@@ -23,7 +23,6 @@ class Service(models.Model):
     duration_minutes = models.PositiveIntegerField()
     buffer_minutes = models.PositiveIntegerField(default=0, help_text="Padding after the service.")
     price = models.DecimalField(max_digits=10, decimal_places=2)
-    photo = models.ImageField(upload_to="services/", null=True, blank=True)
     is_active = models.BooleanField(default=True)
 
     eligible_staff = models.ManyToManyField(
@@ -56,13 +55,22 @@ class StaffService(models.Model):
 
 
 class ServicePhoto(models.Model):
-    """Gallery photo attached to a service (in addition to the legacy `Service.photo` cover)."""
+    """Photo in a service's gallery. Exactly one row per service may be primary —
+    that's the image surfaced as the service's cover on cards and listings."""
 
     service = models.ForeignKey(Service, on_delete=models.CASCADE, related_name="gallery")
     image = models.ImageField(upload_to="services/")
     caption = models.CharField(max_length=255, blank=True)
     sort_order = models.PositiveIntegerField(default=0)
+    is_primary = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
 
     class Meta:
-        ordering = ["sort_order", "id"]
+        ordering = ["-is_primary", "sort_order", "id"]
+        constraints = [
+            models.UniqueConstraint(
+                fields=["service"],
+                condition=models.Q(is_primary=True),
+                name="unique_primary_photo_per_service",
+            ),
+        ]

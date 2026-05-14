@@ -1,8 +1,10 @@
 import math
 
+from django.db import transaction
 from django.db.models import Q
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 
@@ -53,6 +55,14 @@ def _haversine_km(lat1, lng1, lat2, lng2) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
+class ShopPagination(PageNumberPagination):
+    """Paginator for the public shops list — grid-friendly page size."""
+
+    page_size = 12
+    page_size_query_param = "page_size"
+    max_page_size = 48
+
+
 class ShopCategoryViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = ShopCategory.objects.all()
     serializer_class = ShopCategorySerializer
@@ -61,6 +71,7 @@ class ShopCategoryViewSet(viewsets.ReadOnlyModelViewSet):
 
 class ShopViewSet(viewsets.ModelViewSet):
     queryset = Shop.objects.all()
+    pagination_class = ShopPagination
     filterset_fields = ["status", "city", "categories"]
     search_fields = ["name", "description", "city"]
     ordering_fields = ["created_at", "name"]
@@ -94,7 +105,8 @@ class ShopViewSet(viewsets.ModelViewSet):
         self.perform_create(write_serializer)
         shop = write_serializer.instance
         return Response(
-            ShopDetailSerializer(shop).data, status=status.HTTP_201_CREATED
+            ShopDetailSerializer(shop, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
         )
 
     def update(self, request, *args, **kwargs):
@@ -104,7 +116,11 @@ class ShopViewSet(viewsets.ModelViewSet):
         write_serializer = self.get_serializer(instance, data=request.data, partial=partial)
         write_serializer.is_valid(raise_exception=True)
         self.perform_update(write_serializer)
-        return Response(ShopDetailSerializer(write_serializer.instance).data)
+        return Response(
+            ShopDetailSerializer(
+                write_serializer.instance, context={"request": request}
+            ).data
+        )
 
     def perform_create(self, serializer):
         data = serializer.validated_data
@@ -173,15 +189,25 @@ class ShopViewSet(viewsets.ModelViewSet):
             if distance <= radius:
                 results.append((distance, shop))
         results.sort(key=lambda x: x[0])
-        data = ShopListSerializer([s for _, s in results], many=True).data
+        data = ShopListSerializer(
+            [s for _, s in results], many=True, context={"request": request}
+        ).data
         for entry, (distance, _) in zip(data, results):
             entry["distance_km"] = round(distance, 2)
         return Response(data)
 
     @action(detail=False, methods=["get"], permission_classes=[IsShopOwner])
     def mine(self, request):
-        shops = Shop.objects.filter(owner=request.user)
-        return Response(ShopListSerializer(shops, many=True).data)
+        shops = Shop.objects.filter(owner=request.user).order_by("-created_at")
+        page = self.paginate_queryset(shops)
+        if page is not None:
+            serializer = ShopListSerializer(
+                page, many=True, context={"request": request}
+            )
+            return self.get_paginated_response(serializer.data)
+        return Response(
+            ShopListSerializer(shops, many=True, context={"request": request}).data
+        )
 
     @action(detail=True, methods=["post"], permission_classes=[IsShopOwner])
     def publish(self, request, pk=None):
@@ -190,7 +216,7 @@ class ShopViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
         shop.status = Shop.Status.ACTIVE
         shop.save(update_fields=["status", "updated_at"])
-        return Response(ShopDetailSerializer(shop).data)
+        return Response(ShopDetailSerializer(shop, context={"request": request}).data)
 
     @action(detail=True, methods=["post"], permission_classes=[IsShopOwner])
     def pause(self, request, pk=None):
@@ -199,7 +225,7 @@ class ShopViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
         shop.status = Shop.Status.PAUSED
         shop.save(update_fields=["status", "updated_at"])
-        return Response(ShopDetailSerializer(shop).data)
+        return Response(ShopDetailSerializer(shop, context={"request": request}).data)
 
     @action(detail=True, methods=["get", "put"], url_path="hours")
     def hours(self, request, pk=None):
@@ -248,7 +274,9 @@ class ShopViewSet(viewsets.ModelViewSet):
         shop = self.get_object()
         if request.method == "GET":
             qs = ShopPhoto.objects.filter(shop=shop).order_by("sort_order", "id")
-            return Response(ShopPhotoSerializer(qs, many=True).data)
+            return Response(
+                ShopPhotoSerializer(qs, many=True, context={"request": request}).data
+            )
 
         if shop.owner_id != request.user.id:
             return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
@@ -256,13 +284,24 @@ class ShopViewSet(viewsets.ModelViewSet):
         image = request.FILES.get("image")
         if image is None:
             return Response({"detail": "image file is required."}, status=400)
+        # New uploads go to the back of the queue (after any existing photos)
+        # so they don't accidentally replace the cover.
+        next_order = (
+            ShopPhoto.objects.filter(shop=shop)
+            .order_by("-sort_order")
+            .values_list("sort_order", flat=True)
+            .first()
+        )
         photo = ShopPhoto.objects.create(
             shop=shop,
             image=image,
             caption=request.data.get("caption", ""),
-            sort_order=int(request.data.get("sort_order", 0) or 0),
+            sort_order=(next_order + 1) if next_order is not None else 0,
         )
-        return Response(ShopPhotoSerializer(photo).data, status=status.HTTP_201_CREATED)
+        return Response(
+            ShopPhotoSerializer(photo, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=True, methods=["delete"], url_path=r"photos/(?P<photo_id>\d+)")
     def delete_photo(self, request, pk=None, photo_id=None):
@@ -271,6 +310,38 @@ class ShopViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
         ShopPhoto.objects.filter(shop=shop, id=photo_id).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"], url_path=r"photos/(?P<photo_id>\d+)/cover")
+    def set_cover_photo(self, request, pk=None, photo_id=None):
+        """Promote a photo to cover by giving it sort_order=0 and bumping others.
+
+        The shop list/detail endpoints derive `cover_photo` from the photo with
+        the lowest `(sort_order, id)`, so setting the target to 0 makes it the
+        cover unconditionally. We renumber the rest 1..N in their existing
+        relative order to keep the sort sequence dense.
+        """
+        shop = self.get_object()
+        if shop.owner_id != request.user.id:
+            return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
+        target = ShopPhoto.objects.filter(shop=shop, id=photo_id).first()
+        if not target:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        with transaction.atomic():
+            others = (
+                ShopPhoto.objects.filter(shop=shop)
+                .exclude(id=target.id)
+                .order_by("sort_order", "id")
+            )
+            target.sort_order = 0
+            target.save(update_fields=["sort_order"])
+            for i, other in enumerate(others, start=1):
+                if other.sort_order != i:
+                    other.sort_order = i
+                    other.save(update_fields=["sort_order"])
+        qs = ShopPhoto.objects.filter(shop=shop).order_by("sort_order", "id")
+        return Response(
+            ShopPhotoSerializer(qs, many=True, context={"request": request}).data
+        )
 
     @action(detail=True, methods=["get", "post"], url_path="overrides")
     def overrides(self, request, pk=None):
@@ -391,6 +462,28 @@ class StaffViewSet(viewsets.ModelViewSet):
             qs = qs.filter(shop__owner=self.request.user)
         return qs
 
+    @action(detail=False, methods=["get"], url_path="stats", permission_classes=[IsShopOwner])
+    def stats(self, request):
+        """Aggregate counts for the staff KPI cards on the owner dashboard.
+
+        Mirrors the `/services/stats/` pattern: requires `?shop=<id>` and that
+        the caller owns the shop. Counts run against the whole staff table for
+        the shop so they stay stable independent of any list pagination.
+        """
+        shop_id = request.query_params.get("shop")
+        if not shop_id:
+            return Response({"detail": "shop is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not Shop.objects.filter(pk=shop_id, owner=request.user).exists():
+            return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
+        qs = Staff.objects.filter(shop_id=shop_id)
+        total = qs.count()
+        active = qs.filter(is_active=True).count()
+        return Response({
+            "total": total,
+            "active": active,
+            "inactive": total - active,
+        })
+
     @action(detail=True, methods=["get", "put"], url_path="hours")
     def working_hours(self, request, pk=None):
         staff_obj = self.get_object()
@@ -431,7 +524,12 @@ class FavoriteViewSet(viewsets.ModelViewSet):
     http_method_names = ["get", "post", "delete"]
 
     def get_queryset(self):
-        return Favorite.objects.filter(customer=self.request.user)
+        return (
+            Favorite.objects.filter(customer=self.request.user)
+            .select_related("shop")
+            .prefetch_related("shop__categories", "shop__photos")
+            .order_by("-created_at")
+        )
 
     def perform_create(self, serializer):
         serializer.save(customer=self.request.user)

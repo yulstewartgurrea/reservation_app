@@ -1,6 +1,9 @@
+from django.db import transaction
+from django.db.models import Avg
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.exceptions import PermissionDenied
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.response import Response
 
@@ -15,6 +18,18 @@ from .serializers import (
 )
 
 
+class ServicePagination(PageNumberPagination):
+    """Paginator for the public services list.
+
+    Lets the frontend ask for grid-friendly page sizes (e.g. 8 cards on the
+    shop detail page) without exposing a way to slurp the whole table.
+    """
+
+    page_size = 12
+    page_size_query_param = "page_size"
+    max_page_size = 50
+
+
 class ServiceCategoryViewSet(viewsets.ReadOnlyModelViewSet):
     queryset = ServiceCategory.objects.all()
     serializer_class = ServiceCategorySerializer
@@ -23,9 +38,12 @@ class ServiceCategoryViewSet(viewsets.ReadOnlyModelViewSet):
 
 class ServiceViewSet(viewsets.ModelViewSet):
     serializer_class = ServiceSerializer
+    pagination_class = ServicePagination
     parser_classes = [JSONParser, MultiPartParser, FormParser]
     filterset_fields = ["shop", "category", "is_active"]
     search_fields = ["name", "description"]
+    ordering_fields = ["name", "price", "duration_minutes", "created_at"]
+    ordering = ["name"]
 
     def get_permissions(self):
         if self.action in ("list", "retrieve", "discover"):
@@ -37,10 +55,26 @@ class ServiceViewSet(viewsets.ModelViewSet):
         return [IsShopOwner()]
 
     def get_queryset(self):
+        """Scope service rows to the calling role.
+
+        - Owner viewing their own shop (`?shop=<id>` where they own that shop):
+          return all services including inactive ones, so the owner dashboard
+          can show and manage them.
+        - Anyone else hitting `list`: only active services (public catalog).
+        - Mutating actions: restricted to services on shops the caller owns.
+        """
         qs = Service.objects.select_related("shop", "category")
         if self.action in ("update", "partial_update", "destroy"):
-            qs = qs.filter(shop__owner=self.request.user)
-        elif self.action == "list":
+            return qs.filter(shop__owner=self.request.user)
+        if self.action == "list":
+            shop_id = self.request.query_params.get("shop")
+            user = self.request.user
+            if (
+                shop_id
+                and user.is_authenticated
+                and Shop.objects.filter(pk=shop_id, owner=user).exists()
+            ):
+                return qs.filter(shop_id=shop_id)
             qs = qs.filter(is_active=True)
         return qs
 
@@ -57,7 +91,11 @@ class ServiceViewSet(viewsets.ModelViewSet):
         parser_classes=[MultiPartParser, FormParser, JSONParser],
     )
     def photos(self, request, pk=None):
-        """List a service's gallery, or upload a new photo (owner-only)."""
+        """List a service's gallery, or upload a new photo (owner-only).
+
+        The first photo uploaded to a service is auto-marked as primary so the
+        service always has a cover image once it has any photo at all.
+        """
         service = self.get_object()
         if request.method == "GET":
             qs = service.gallery.all()
@@ -69,11 +107,13 @@ class ServiceViewSet(viewsets.ModelViewSet):
         image = request.FILES.get("image")
         if image is None:
             return Response({"detail": "image file is required."}, status=400)
+        is_first_photo = not service.gallery.exists()
         photo = ServicePhoto.objects.create(
             service=service,
             image=image,
             caption=request.data.get("caption", ""),
             sort_order=int(request.data.get("sort_order", 0) or 0),
+            is_primary=is_first_photo,
         )
         return Response(ServicePhotoSerializer(photo).data, status=status.HTTP_201_CREATED)
 
@@ -82,15 +122,81 @@ class ServiceViewSet(viewsets.ModelViewSet):
         service = self.get_object()
         if service.shop.owner_id != request.user.id:
             return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
-        ServicePhoto.objects.filter(service=service, id=photo_id).delete()
+
+        with transaction.atomic():
+            photo = ServicePhoto.objects.filter(service=service, id=photo_id).first()
+            if photo is None:
+                return Response(status=status.HTTP_204_NO_CONTENT)
+            was_primary = photo.is_primary
+            photo.delete()
+            # Promote the next photo so the service keeps a cover image.
+            if was_primary:
+                fallback = (
+                    ServicePhoto.objects.filter(service=service)
+                    .order_by("sort_order", "id")
+                    .first()
+                )
+                if fallback is not None:
+                    fallback.is_primary = True
+                    fallback.save(update_fields=["is_primary"])
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(
+        detail=True,
+        methods=["post"],
+        url_path=r"photos/(?P<photo_id>\d+)/primary",
+    )
+    def set_primary_photo(self, request, pk=None, photo_id=None):
+        """Mark one photo as the service's primary (cover) image."""
+        service = self.get_object()
+        if service.shop.owner_id != request.user.id:
+            return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
+        photo = ServicePhoto.objects.filter(service=service, id=photo_id).first()
+        if photo is None:
+            return Response({"detail": "Photo not found."}, status=status.HTTP_404_NOT_FOUND)
+
+        # Clear the existing primary first so the partial unique constraint
+        # doesn't fire mid-transaction.
+        with transaction.atomic():
+            ServicePhoto.objects.filter(service=service, is_primary=True).exclude(
+                id=photo.id
+            ).update(is_primary=False)
+            if not photo.is_primary:
+                photo.is_primary = True
+                photo.save(update_fields=["is_primary"])
+        return Response(ServicePhotoSerializer(photo).data)
+
+    @action(detail=False, methods=["get"], url_path="stats", permission_classes=[IsShopOwner])
+    def stats(self, request):
+        """Aggregate service counts for an owner-managed shop.
+
+        Used by the shop dashboard KPI strip. Aggregates run against the whole
+        services table (not just the current page) so the numbers stay stable
+        regardless of pagination. Requires `?shop=<id>` and shop ownership.
+        """
+        shop_id = request.query_params.get("shop")
+        if not shop_id:
+            return Response({"detail": "shop is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not Shop.objects.filter(pk=shop_id, owner=request.user).exists():
+            return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
+        qs = Service.objects.filter(shop_id=shop_id)
+        total = qs.count()
+        active = qs.filter(is_active=True).count()
+        avg = qs.aggregate(v=Avg("duration_minutes"))["v"] or 0
+        return Response({
+            "total": total,
+            "active": active,
+            "inactive": total - active,
+            "avg_duration": round(avg),
+        })
 
     @action(detail=False, methods=["get"], url_path="discover")
     def discover(self, request):
         """Cross-shop service search for customers.
 
         Returns services with shop name + city embedded so the result list can link
-        directly to the booking flow without a second round-trip per row.
+        directly to the booking flow without a second round-trip per row. Paginated
+        via the same `ServicePagination` used by the list action.
         """
         q = request.query_params.get("q", "").strip()
         category = request.query_params.get("category")
@@ -100,6 +206,7 @@ class ServiceViewSet(viewsets.ModelViewSet):
             Service.objects.select_related("shop", "category")
             .prefetch_related("gallery")
             .filter(is_active=True, shop__status=Shop.Status.ACTIVE)
+            .order_by("name", "id")
         )
         if q:
             qs = qs.filter(name__icontains=q)
@@ -108,33 +215,31 @@ class ServiceViewSet(viewsets.ModelViewSet):
         if city:
             qs = qs.filter(shop__city__iexact=city)
 
-        results = []
-        for s in qs[:50]:
-            cover = self._cover_url(s, request)
-            results.append(
-                {
-                    "id": s.id,
-                    "name": s.name,
-                    "duration_minutes": s.duration_minutes,
-                    "price": str(s.price),
-                    "cover_photo": cover,
-                    "shop_id": s.shop_id,
-                    "shop_name": s.shop.name,
-                    "shop_city": s.shop.city,
-                    "category": s.category.name if s.category else None,
-                }
-            )
-        return Response(results)
+        def serialize(service):
+            return {
+                "id": service.id,
+                "name": service.name,
+                "duration_minutes": service.duration_minutes,
+                "price": str(service.price),
+                "cover_photo": self._cover_url(service, request),
+                "shop_id": service.shop_id,
+                "shop_name": service.shop.name,
+                "shop_city": service.shop.city,
+                "category": service.category.name if service.category else None,
+            }
+
+        page = self.paginate_queryset(qs)
+        if page is not None:
+            return self.get_paginated_response([serialize(s) for s in page])
+        return Response([serialize(s) for s in qs])
 
     @staticmethod
     def _cover_url(service, request):
-        """Same fallback logic as `ServiceSerializer.get_cover_photo` —
-        first gallery photo, else the legacy single `Service.photo` field."""
-        first = next(iter(service.gallery.all()), None)
-        if first:
-            url = first.image.url
-        elif service.photo:
-            url = service.photo.url
-        else:
+        """Same logic as `ServiceSerializer.get_cover_photo` —
+        primary photo, falling back to the first by sort_order."""
+        photos = list(service.gallery.all())
+        if not photos:
             return None
+        primary = next((p for p in photos if p.is_primary), photos[0])
+        url = primary.image.url
         return request.build_absolute_uri(url) if request else url

@@ -5,9 +5,11 @@ from .views import (
     MeView,
     RegisterView,
     confirm_password_reset,
+    request_email_otp,
     request_password_reset,
     resend_verification,
     verify_email,
+    verify_email_otp,
 )
 
 urlpatterns = [
@@ -17,6 +19,8 @@ urlpatterns = [
     path("me/", MeView.as_view(), name="me"),
     path("verify-email/", verify_email, name="verify_email"),
     path("resend-verification/", resend_verification, name="resend_verification"),
+    path("request-otp/", request_email_otp, name="request_email_otp"),
+    path("verify-otp/", verify_email_otp, name="verify_email_otp"),
     path("password/reset/", request_password_reset, name="password_reset"),
     path("password/reset/confirm/", confirm_password_reset, name="password_reset_confirm"),
 ]

@@ -3,8 +3,10 @@ from rest_framework import permissions, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .models import Notification
-from .serializers import NotificationSerializer
+from apps.accounts.permissions import IsShopOwner
+
+from .models import MaintenanceReminder, Notification
+from .serializers import MaintenanceReminderSerializer, NotificationSerializer
 
 
 class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
@@ -26,3 +28,20 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     def mark_all_read(self, request):
         count = self.get_queryset().filter(read_at__isnull=True).update(read_at=timezone.now())
         return Response({"marked": count})
+
+
+class MaintenanceReminderViewSet(viewsets.ModelViewSet):
+    """Shop-owner-only CRUD over their own shop's maintenance reminders."""
+
+    serializer_class = MaintenanceReminderSerializer
+    permission_classes = [IsShopOwner]
+    filterset_fields = ["shop", "is_active"]
+
+    def get_queryset(self):
+        return (
+            MaintenanceReminder.objects.select_related("shop", "customer", "service")
+            .filter(shop__owner=self.request.user)
+        )
+
+    def perform_create(self, serializer):
+        serializer.save(created_by=self.request.user)

@@ -97,7 +97,12 @@ AUTH_PASSWORD_VALIDATORS = [
 ]
 
 LANGUAGE_CODE = "en-us"
-TIME_ZONE = "UTC"
+# Shop hours (WeekdayHours.open_time / close_time) are stored as naive
+# `time` values that the shop owner enters in local time. `compute_slots`
+# combines them with a date via `timezone.get_current_timezone()`, so this
+# setting must match the operating region's offset. Storage stays UTC
+# (USE_TZ=True); this only changes how local times are interpreted/displayed.
+TIME_ZONE = env("DJANGO_TIME_ZONE", default="Asia/Manila")
 USE_I18N = True
 USE_TZ = True
 
@@ -143,10 +148,12 @@ SPECTACULAR_SETTINGS = {
 CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=["http://localhost:3000"])
 CORS_ALLOW_CREDENTIALS = True
 
+REDIS_URL = env("REDIS_URL")
+
 CHANNEL_LAYERS = {
     "default": {
         "BACKEND": "channels_redis.core.RedisChannelLayer",
-        "CONFIG": {"hosts": [env("REDIS_URL")]},
+        "CONFIG": {"hosts": [REDIS_URL]},
     },
 }
 
@@ -165,6 +172,10 @@ CELERY_BEAT_SCHEDULE = {
     "decay-strikes": {
         "task": "apps.reservations.tasks.decay_strikes",
         "schedule": 3600.0,  # hourly
+    },
+    "dispatch-maintenance-reminders": {
+        "task": "apps.notifications.tasks.dispatch_due_maintenance_reminders",
+        "schedule": 3600.0,  # hourly is plenty for "due in 6 months" cadences
     },
 }
 

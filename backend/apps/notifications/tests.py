@@ -1,14 +1,22 @@
-"""Integration tests for the notifications REST API + signal-driven creation."""
+"""Integration tests for the notifications REST API + signal-driven creation,
+plus maintenance-reminder CRUD and dispatching."""
 
+from datetime import timedelta
+
+from django.core import mail
 from django.test import TestCase
+from django.utils import timezone
 from rest_framework.test import APIClient
 
 from apps.core.test_factories import (
     make_customer,
     make_reservation,
+    make_service,
+    make_shop,
     make_shop_owner,
 )
-from apps.notifications.models import Notification
+from apps.notifications.models import MaintenanceReminder, Notification
+from apps.notifications.services import dispatch_due_maintenance_reminders
 
 
 class NotificationCreationViaSignalsTests(TestCase):
@@ -77,3 +85,139 @@ class NotificationRESTAPITests(TestCase):
         self.client.force_authenticate(None)
         response = self.client.get("/api/notifications/")
         self.assertEqual(response.status_code, 401)
+
+
+class MaintenanceReminderCRUDTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.owner = make_shop_owner()
+        self.shop = make_shop(owner=self.owner)
+        self.service = make_service(shop=self.shop)
+        self.customer = make_customer()
+        self.client.force_authenticate(self.owner)
+
+    def _payload(self, **overrides):
+        base = {
+            "shop": self.shop.id,
+            "customer_email": self.customer.email,
+            "service": self.service.id,
+            "title": "Aircon cleaning",
+            "message": "Time to clean the unit.",
+            "interval_months": 6,
+            "next_due_at": (timezone.now() + timedelta(days=180)).isoformat(),
+            "is_active": True,
+        }
+        base.update(overrides)
+        return base
+
+    def test_owner_can_create_reminder(self):
+        response = self.client.post(
+            "/api/notifications/maintenance-reminders/", self._payload(), format="json"
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        self.assertEqual(MaintenanceReminder.objects.count(), 1)
+        reminder = MaintenanceReminder.objects.first()
+        self.assertEqual(reminder.customer, self.customer)
+        self.assertEqual(reminder.created_by, self.owner)
+
+    def test_create_rejects_unknown_customer_email(self):
+        response = self.client.post(
+            "/api/notifications/maintenance-reminders/",
+            self._payload(customer_email="ghost@example.com"),
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("customer_email", response.json())
+
+    def test_owner_cannot_create_for_other_shop(self):
+        other_owner = make_shop_owner()
+        other_shop = make_shop(owner=other_owner)
+        response = self.client.post(
+            "/api/notifications/maintenance-reminders/",
+            self._payload(shop=other_shop.id),
+            format="json",
+        )
+        self.assertEqual(response.status_code, 400)
+
+    def test_customer_cannot_use_endpoint(self):
+        self.client.force_authenticate(self.customer)
+        response = self.client.get("/api/notifications/maintenance-reminders/")
+        self.assertEqual(response.status_code, 403)
+
+    def test_list_only_returns_own_shop_reminders(self):
+        MaintenanceReminder.objects.create(
+            shop=self.shop,
+            customer=self.customer,
+            title="Mine",
+            interval_months=6,
+            next_due_at=timezone.now() + timedelta(days=180),
+        )
+        # Another shop owner's reminder shouldn't appear
+        other_owner = make_shop_owner()
+        other_shop = make_shop(owner=other_owner)
+        MaintenanceReminder.objects.create(
+            shop=other_shop,
+            customer=self.customer,
+            title="Theirs",
+            interval_months=6,
+            next_due_at=timezone.now() + timedelta(days=180),
+        )
+        response = self.client.get("/api/notifications/maintenance-reminders/")
+        self.assertEqual(response.status_code, 200)
+        results = response.json().get("results") or response.json()
+        titles = {row["title"] for row in results}
+        self.assertEqual(titles, {"Mine"})
+
+
+class MaintenanceReminderDispatchTests(TestCase):
+    def setUp(self):
+        self.owner = make_shop_owner()
+        self.shop = make_shop(owner=self.owner)
+        self.customer = make_customer()
+
+    def _reminder(self, *, due_in_days: int, **overrides):
+        defaults = dict(
+            shop=self.shop,
+            customer=self.customer,
+            title="Aircon cleaning",
+            interval_months=6,
+            next_due_at=timezone.now() + timedelta(days=due_in_days),
+            is_active=True,
+        )
+        defaults.update(overrides)
+        return MaintenanceReminder.objects.create(**defaults)
+
+    def test_dispatches_only_due_reminders(self):
+        due = self._reminder(due_in_days=-1)
+        not_due = self._reminder(due_in_days=10)
+        mail.outbox.clear()
+        result = dispatch_due_maintenance_reminders()
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(len(mail.outbox), 1)
+        due.refresh_from_db()
+        not_due.refresh_from_db()
+        self.assertIsNotNone(due.last_sent_at)
+        self.assertIsNone(not_due.last_sent_at)
+
+    def test_rolls_forward_next_due_after_send(self):
+        reminder = self._reminder(due_in_days=-1, interval_months=6)
+        original_due = reminder.next_due_at
+        dispatch_due_maintenance_reminders()
+        reminder.refresh_from_db()
+        # Should now be ~6 months out
+        self.assertGreater(reminder.next_due_at, original_due)
+        self.assertGreater(reminder.next_due_at, timezone.now() + timedelta(days=150))
+
+    def test_inactive_reminders_skipped(self):
+        self._reminder(due_in_days=-1, is_active=False)
+        mail.outbox.clear()
+        result = dispatch_due_maintenance_reminders()
+        self.assertEqual(result["sent"], 0)
+        self.assertEqual(len(mail.outbox), 0)
+
+    def test_creates_in_app_notification(self):
+        self._reminder(due_in_days=-1)
+        before = Notification.objects.filter(user=self.customer).count()
+        dispatch_due_maintenance_reminders()
+        after = Notification.objects.filter(user=self.customer, kind=Notification.Kind.REMINDER).count()
+        self.assertEqual(after - before, 1)

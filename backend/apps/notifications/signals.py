@@ -24,7 +24,7 @@ def on_reservation_created(sender, instance: Reservation, created: bool, **kwarg
             kind=Notification.Kind.BOOKING_NEW,
             title=f"New booking: {instance.service.name}",
             body=f"{_who(instance)} at {when}",
-            payload={"reservation_id": instance.id},
+            payload={"reservation_id": instance.id, "shop_id": instance.shop_id},
         )
         if instance.customer_id:
             push_to_user(
@@ -32,7 +32,7 @@ def on_reservation_created(sender, instance: Reservation, created: bool, **kwarg
                 kind=Notification.Kind.BOOKING_NEW,
                 title=f"Booking requested at {instance.shop.name}",
                 body=f"{instance.service.name} — {when}",
-                payload={"reservation_id": instance.id},
+                payload={"reservation_id": instance.id, "shop_id": instance.shop_id},
             )
             send_booking_confirmation_email.delay(instance.id)
             schedule_reminders.delay(instance.id)
@@ -60,7 +60,11 @@ def on_status_change(sender, instance: ReservationStatusHistory, created: bool, 
 
     title = f"{reservation.shop.name}: {to_status.replace('_', ' ')}"
     body = f"{reservation.service.name} — {when}"
-    payload = {"reservation_id": reservation.id, "status": to_status}
+    payload = {
+        "reservation_id": reservation.id,
+        "shop_id": reservation.shop_id,
+        "status": to_status,
+    }
 
     if reservation.customer_id:
         push_to_user(

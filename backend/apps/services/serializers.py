@@ -12,7 +12,8 @@ class ServiceCategorySerializer(serializers.ModelSerializer):
 class ServicePhotoSerializer(serializers.ModelSerializer):
     class Meta:
         model = ServicePhoto
-        fields = ("id", "image", "caption", "sort_order")
+        fields = ("id", "image", "caption", "sort_order", "is_primary")
+        read_only_fields = ("is_primary",)
 
 
 class ServiceSerializer(serializers.ModelSerializer):
@@ -32,7 +33,6 @@ class ServiceSerializer(serializers.ModelSerializer):
             "duration_minutes",
             "buffer_minutes",
             "price",
-            "photo",
             "cover_photo",
             "gallery",
             "is_active",
@@ -42,11 +42,11 @@ class ServiceSerializer(serializers.ModelSerializer):
         read_only_fields = ("created_at", "updated_at", "cover_photo", "gallery")
 
     def get_cover_photo(self, obj) -> str | None:
-        """First gallery photo if any, else the legacy single `photo` field."""
+        """The primary gallery photo, falling back to the first by sort_order
+        if no row is marked primary (only happens if backfill missed a service)."""
         request = self.context.get("request")
-        first = obj.gallery.first()
-        if first:
-            return request.build_absolute_uri(first.image.url) if request else first.image.url
-        if obj.photo:
-            return request.build_absolute_uri(obj.photo.url) if request else obj.photo.url
-        return None
+        photos = list(obj.gallery.all())
+        if not photos:
+            return None
+        primary = next((p for p in photos if p.is_primary), photos[0])
+        return request.build_absolute_uri(primary.image.url) if request else primary.image.url

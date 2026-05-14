@@ -39,7 +39,7 @@ class HoursOverrideSerializer(serializers.ModelSerializer):
 class StaffSerializer(serializers.ModelSerializer):
     class Meta:
         model = Staff
-        fields = ("id", "shop", "name", "role", "photo", "is_active")
+        fields = ("id", "shop", "name", "role", "photo", "phone", "email", "is_active")
 
 
 class StaffWorkingHoursSerializer(serializers.ModelSerializer):
@@ -78,6 +78,7 @@ class ShopListSerializer(serializers.ModelSerializer):
 class ShopDetailSerializer(serializers.ModelSerializer):
     categories = ShopCategorySerializer(many=True, read_only=True)
     photos = ShopPhotoSerializer(many=True, read_only=True)
+    cover_photo = serializers.SerializerMethodField()
     weekday_hours = WeekdayHoursSerializer(many=True, read_only=True)
     services_count = serializers.SerializerMethodField()
     reviews_count = serializers.SerializerMethodField()
@@ -103,6 +104,7 @@ class ShopDetailSerializer(serializers.ModelSerializer):
             "commission_rate",
             "cancellation_window_hours",
             "photos",
+            "cover_photo",
             "weekday_hours",
             "services_count",
             "reviews_count",
@@ -111,6 +113,15 @@ class ShopDetailSerializer(serializers.ModelSerializer):
             "updated_at",
         )
         read_only_fields = ("owner", "status", "commission_rate", "created_at", "updated_at")
+
+    def get_cover_photo(self, obj) -> str | None:
+        """First photo by sort_order — same convention as `ShopListSerializer`."""
+        photo = obj.photos.order_by("sort_order", "id").first()
+        if not photo:
+            return None
+        url = photo.image.url
+        request = self.context.get("request")
+        return request.build_absolute_uri(url) if request else url
 
     def get_services_count(self, obj) -> int:
         return obj.services.filter(is_active=True).count()
@@ -146,7 +157,12 @@ class ShopWriteSerializer(serializers.ModelSerializer):
 
 
 class FavoriteSerializer(serializers.ModelSerializer):
+    """Embeds the shop list payload so the /favorites page can render rich
+    cards (name, city, cover, categories) in one request instead of N+1."""
+
+    shop_detail = ShopListSerializer(source="shop", read_only=True)
+
     class Meta:
         model = Favorite
-        fields = ("id", "shop", "created_at")
+        fields = ("id", "shop", "shop_detail", "created_at")
         read_only_fields = ("created_at",)

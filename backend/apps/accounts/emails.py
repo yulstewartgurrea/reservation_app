@@ -14,6 +14,16 @@ def send_verification_email(user, token: str) -> bool:
     )
 
 
+def send_otp_email(user, code: str) -> bool:
+    return send_template_email(
+        to=user.email,
+        subject="Your Reserva verification code",
+        text_template="emails/email_otp.txt",
+        html_template="emails/email_otp.html",
+        context={"user": user, "code": code},
+    )
+
+
 def send_password_reset_email(user, token: str) -> bool:
     link = f"{get_frontend_url()}/reset-password?token={token}"
     return send_template_email(

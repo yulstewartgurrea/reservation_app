@@ -11,6 +11,7 @@ from django.db import transaction
 from django.db.models import Count, Q
 from django.utils import timezone
 
+from apps.notifications.models import Notification
 from apps.shops.models import Shop
 
 from .models import ChatParticipant, ChatRoom, Message
@@ -178,25 +179,77 @@ def _broadcast_room(room: ChatRoom, payload: dict) -> None:
 
 
 def _notify_recipients(*, room: ChatRoom, sender, msg: Message) -> None:
-    """Push a lightweight `chat.new_message` event onto each recipient's user.<id>
-    group so their global unread badge updates without an open room socket."""
+    """Persist a `chat.new_message` notification for each recipient and push
+    the same event onto their `user.<id>` group so open clients update live.
+
+    Collapses per room: if a recipient already has an unread notification for
+    this room, refresh it in place instead of inserting a new row — otherwise
+    a noisy thread would flood the bell with one entry per message.
+    """
+    sender_name = _chat_sender_display(room=room, sender=sender)
+    recipient_ids = {room.customer_id, room.shop.owner_id} - {sender.id}
+    body = msg.body[:120]
+    payload = {"room_id": room.id, "message_id": msg.id}
+
+    for uid in recipient_ids:
+        _upsert_chat_notification(
+            uid=uid, sender_name=sender_name, body=body, payload=payload
+        )
+
     layer = get_channel_layer()
     if layer is None:
         return
-    recipient_ids = {room.customer_id, room.shop.owner_id} - {sender.id}
     for uid in recipient_ids:
         async_to_sync(layer.group_send)(
             f"user.{uid}",
             {
                 "type": "notify",
                 "data": {
-                    "kind": "chat.new_message",
-                    "title": "New message",
-                    "body": msg.body[:120],
-                    "payload": {"room_id": room.id, "message_id": msg.id},
+                    "kind": Notification.Kind.CHAT_NEW_MESSAGE,
+                    "title": sender_name,
+                    "body": body,
+                    "payload": payload,
                 },
             },
         )
+
+
+def _upsert_chat_notification(*, uid: int, sender_name: str, body: str, payload: dict) -> None:
+    with transaction.atomic():
+        existing = (
+            Notification.objects.select_for_update()
+            .filter(
+                user_id=uid,
+                kind=Notification.Kind.CHAT_NEW_MESSAGE,
+                read_at__isnull=True,
+                payload__room_id=payload["room_id"],
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        if existing:
+            existing.title = sender_name
+            existing.body = body
+            existing.payload = payload
+            existing.created_at = timezone.now()
+            existing.save(update_fields=["title", "body", "payload", "created_at"])
+        else:
+            Notification.objects.create(
+                user_id=uid,
+                kind=Notification.Kind.CHAT_NEW_MESSAGE,
+                title=sender_name,
+                body=body,
+                payload=payload,
+            )
+
+
+def _chat_sender_display(*, room: ChatRoom, sender) -> str:
+    # Shop owner messages are presented as coming from the shop, since the
+    # customer sees the conversation in terms of the business, not the person.
+    if sender.id == room.shop.owner_id:
+        return room.shop.name
+    name = (sender.first_name or "").strip()
+    return name or sender.email
 
 
 def _serialize(msg: Message) -> dict:

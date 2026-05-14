@@ -140,6 +140,8 @@ class Staff(models.Model):
     name = models.CharField(max_length=120)
     role = models.CharField(max_length=120, blank=True)
     photo = models.ImageField(upload_to="staff/", null=True, blank=True)
+    phone = models.CharField(max_length=32, blank=True)
+    email = models.EmailField(blank=True)
     is_active = models.BooleanField(default=True)
 
     class Meta:

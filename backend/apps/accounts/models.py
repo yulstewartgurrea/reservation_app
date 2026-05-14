@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.contrib.auth.models import AbstractUser
 from django.db import models
 
@@ -19,6 +20,8 @@ class User(AbstractUser):
 
     email_verified_at = models.DateTimeField(null=True, blank=True)
 
+    last_seen_at = models.DateTimeField(null=True, blank=True)
+
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = ["username"]
 
@@ -32,3 +35,30 @@ class User(AbstractUser):
 
     def __str__(self) -> str:
         return f"{self.email} ({self.role})"
+
+
+class EmailOTP(models.Model):
+    """One-time 6-digit code emailed for account verification.
+
+    The plaintext code is never stored — only a hashed form. Codes are valid
+    for ~10 minutes, with a small attempt cap to slow brute-force.
+    """
+
+    class Purpose(models.TextChoices):
+        SIGNUP = "signup", "Signup verification"
+
+    user = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.CASCADE,
+        related_name="email_otps",
+    )
+    purpose = models.CharField(max_length=16, choices=Purpose.choices, default=Purpose.SIGNUP)
+    code_hash = models.CharField(max_length=128)
+    expires_at = models.DateTimeField()
+    consumed_at = models.DateTimeField(null=True, blank=True)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+        indexes = [models.Index(fields=["user", "purpose", "consumed_at"])]
