@@ -107,11 +107,12 @@ data "aws_iam_policy_document" "deployer_inline" {
   }
 
   # Terraform state — read/write for the ecs layer's key prefix only.
+  # Key layout from terragrunt_base.hcl: <env>/<region>/<layer>/terraform.tfstate
   statement {
     sid     = "TerraformStateObject"
     actions = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
     resources = [
-      "arn:aws:s3:::${var.state_bucket}/ecs/*",
+      "arn:aws:s3:::${var.state_bucket}/${var.env}/${local.region}/ecs/*",
     ]
   }
 
