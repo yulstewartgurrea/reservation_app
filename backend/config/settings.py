@@ -148,7 +148,19 @@ SPECTACULAR_SETTINGS = {
 CORS_ALLOWED_ORIGINS = env.list("CORS_ALLOWED_ORIGINS", default=["http://localhost:3000"])
 CORS_ALLOW_CREDENTIALS = True
 
-REDIS_URL = env("REDIS_URL")
+def _ensure_redis_ssl_params(url: str) -> str:
+    # AWS ElastiCache emits rediss:// URLs without an ssl_cert_reqs query param.
+    # redis-py (used by Celery + channels_redis) rejects rediss:// URLs that
+    # don't set ssl_cert_reqs, so we append it here. CERT_NONE is acceptable
+    # because the wire is already private (VPC-only, SG-restricted); TLS still
+    # encrypts the traffic, we just skip CA-chain verification.
+    if url.startswith("rediss://") and "ssl_cert_reqs=" not in url:
+        sep = "&" if "?" in url else "?"
+        return f"{url}{sep}ssl_cert_reqs=CERT_NONE"
+    return url
+
+
+REDIS_URL = _ensure_redis_ssl_params(env("REDIS_URL"))
 
 CHANNEL_LAYERS = {
     "default": {
@@ -157,8 +169,8 @@ CHANNEL_LAYERS = {
     },
 }
 
-CELERY_BROKER_URL = env("CELERY_BROKER_URL")
-CELERY_RESULT_BACKEND = env("CELERY_RESULT_BACKEND")
+CELERY_BROKER_URL = _ensure_redis_ssl_params(env("CELERY_BROKER_URL"))
+CELERY_RESULT_BACKEND = _ensure_redis_ssl_params(env("CELERY_RESULT_BACKEND"))
 CELERY_ACCEPT_CONTENT = ["json"]
 CELERY_TASK_SERIALIZER = "json"
 CELERY_RESULT_SERIALIZER = "json"

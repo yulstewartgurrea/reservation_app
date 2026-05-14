@@ -846,6 +846,17 @@ Your IAM user is missing IAM/CloudFront management permissions. See the "Prerequ
 **Workflow fails with `Invalid bucket name "...\n"` or similar in the `aws s3 sync` step**
 A GitHub Environment variable has a stray newline or trailing whitespace — copy-pasting a value with a newline into the GitHub UI preserves it. Re-edit the variable (Settings → Environments → staging → Variables → pencil icon) and re-enter without the trailing newline. The workflow strips whitespace defensively (see [.github/workflows/frontend-deploy.yml](.github/workflows/frontend-deploy.yml)), so this only bites if you paste with a newline AND the strip somehow fails.
 
+**Celery worker crash-loops with `ValueError: A rediss:// URL must have parameter ssl_cert_reqs and this must be set to CERT_REQUIRED, CERT_OPTIONAL, or CERT_NONE` (no OTP / reminder / confirmation emails go out)**
+AWS ElastiCache emits `rediss://` (TLS) URLs without an `ssl_cert_reqs` query param. The `redis-py` client used by Celery (and `channels_redis`) refuses to connect without it. Symptom is loud: every `celery -A config worker` startup logs CRITICAL → exits → ECS restarts → repeats. Queued tasks pile up; nothing actually sends. Fix lives in [backend/config/settings.py](backend/config/settings.py) — `_ensure_redis_ssl_params()` appends `?ssl_cert_reqs=CERT_NONE` when the URL starts with `rediss://` and the param isn't already set. `CERT_NONE` is safe here because the wire is VPC-private and SG-locked; TLS still encrypts, we just skip CA-chain verification (ElastiCache's certs aren't in Python's default trust store anyway).
+
+**Outbound emails don't arrive even when Celery is running (no error in worker logs)**
+SES is in **sandbox mode** by default — you can only send TO addresses that are AWS-verified, and only FROM verified identities. Check status:
+```bash
+AWS_PROFILE=reservation-stage aws sesv2 get-account --region ap-southeast-1 --query 'ProductionAccessEnabled'
+AWS_PROFILE=reservation-stage aws sesv2 list-email-identities --region ap-southeast-1
+```
+`ProductionAccessEnabled: false` + identity with `VerifiedForSendingStatus: None` = the verification email was sent but never clicked. Either click the link Amazon sent (check inbox + spam), or request production access via the SES console (Account dashboard → "Request production access"). Until one of those, every send to an unverified recipient silently fails / bounces.
+
 **`terragrunt apply` fails with `InvalidPermission.Duplicate: the specified rule ... already exists` on a security group rule**
 You (or a previous run) created the rule manually via the AWS Console / CLI before adding it to Terraform. AWS rejects the duplicate; Terraform has no state for it. Fix: import the existing rule into Terraform state, then re-apply. The resource address depends on the module path — for the internal ALB's CloudFront prefix-list ingress, that's:
 ```bash
