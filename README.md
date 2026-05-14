@@ -434,6 +434,9 @@ Below: each feature with where it lives in the code.
 5. Smoke test: register a new account; the OTP email should land within a few seconds. Cap: ~500 sends/day for free Gmail.
 
 #### Recipe B — AWS SES (production)
+
+> **For the deployed stage/prod stack on AWS:** SES is already wired as a Terragrunt layer at [aws/layers/ses/](aws/layers/ses/). It provisions the verified sender, IAM SMTP user, access key, and writes the credentials into SSM at `/reservation/<env>/ses/*` — which the ECS task already reads as `EMAIL_*`. See [aws/README.md § "SES (transactional email) setup"](aws/README.md#ses-transactional-email-setup) for the apply-order checklist. The manual steps below are for **local dev pointing at real SES** (rare — most devs stay on the console backend).
+
 1. **Verify a sender.** SES console → *Verified identities* → add either a single email (quick) or your domain (recommended; add the DKIM CNAMEs to Route 53).
 2. **Create SMTP credentials.** SES console → *SMTP settings* → *Create SMTP credentials*. This generates an IAM user with the SES SMTP password (NOT your regular IAM access key — they look similar but they're different).
 3. **Request production access.** Until you do, SES can only send to verified addresses. *Account dashboard* → *Request production access* (Amazon usually approves within 24h with a brief use-case description).
@@ -813,8 +816,21 @@ Your IAM user is missing IAM/CloudFront management permissions. See the "Prerequ
 **Workflow fails with `Invalid bucket name "...\n"` or similar in the `aws s3 sync` step**
 A GitHub Environment variable has a stray newline or trailing whitespace — copy-pasting a value with a newline into the GitHub UI preserves it. Re-edit the variable (Settings → Environments → staging → Variables → pencil icon) and re-enter without the trailing newline. The workflow strips whitespace defensively (see [.github/workflows/frontend-deploy.yml](.github/workflows/frontend-deploy.yml)), so this only bites if you paste with a newline AND the strip somehow fails.
 
+**`terragrunt apply` in CI fails with `AccessDenied ... s3:PutEncryptionConfiguration` (or `s3:PutBucketPolicy`) on the state bucket**
+Terragrunt re-checks the remote-state bucket's settings (SSE, root-access policy, enforced TLS) every run and tries to update if they differ from its expected values. The state bucket was bootstrapped once with the admin profile, and the CI deploy role only has state read/write perms — not bucket-management perms. Fix: [terragrunt_base.hcl](aws/accounts/terragrunt_base.hcl) sets `skip_bucket_ssencryption = true`, `skip_bucket_root_access = true`, `skip_bucket_enforced_tls = true` so terragrunt trusts the existing settings instead of trying to enforce them. If you need to legitimately change those settings, do it once from local with the admin profile.
+
+**`terragrunt apply` in CI fails with `Error: Backend initialization required, please run "terraform init"` / `Reason: Initial configuration of the requested backend "s3"`**
+The S3 backend config in [terragrunt_base.hcl](aws/accounts/terragrunt_base.hcl) and the AWS provider in [_common/providers.tf](aws/accounts/_common/providers.tf) both default to using a named AWS CLI profile (`reservation-stage`, set in [stage/account.hcl](aws/accounts/stage/account.hcl)). That works locally — `aws configure --profile reservation-stage` — but breaks in CI, where credentials come from OIDC env vars and no named profile exists. Terraform tries to init the backend with the non-existent profile, can't authenticate, and the next command sees an uninitialized backend.
+Fix: [terragrunt_base.hcl](aws/accounts/terragrunt_base.hcl) now detects CI (via the `CI` env var that GitHub Actions sets automatically) and substitutes `profile = null` for the backend + `profile_name = ""` for the provider, falling back to the env-var credential chain. Local dev still uses the named profile.
+
 **`terragrunt apply` fails with `BucketAlreadyExists` on the frontend bucket**
 S3 bucket names are **globally unique** across all AWS accounts. Edit `frontend_bucket_name` in [aws/accounts/stage/ap-southeast-1/region.hcl](aws/accounts/stage/ap-southeast-1/region.hcl) (and/or the prod one) — add a suffix like `-936146782254` or your initials. Re-run apply.
+
+**`next build` fails with `useSearchParams() should be wrapped in a suspense boundary at page "/X"` (during `Generating static pages`)**
+Any client page that calls `useSearchParams()` (directly or via a child component) must be wrapped in `<Suspense>` for static export — otherwise Next bails out of prerendering. Fix: split the component, put the `useSearchParams` body in a `*Inner` function, and export a default that wraps it in `<Suspense fallback={...}>`. See [verify-email/page.tsx](frontend/src/app/verify-email/page.tsx) or [reservations/page.tsx](frontend/src/app/reservations/page.tsx) for the pattern. If the search-params consumer is a child component reached through a `_client.tsx`, wrap the JSX in the `_client.tsx` instead (see [my-shops/[id]/reservations/_client.tsx](frontend/src/app/my-shops/[id]/reservations/_client.tsx)).
+
+**`next build` warns `Invalid next.config.mjs options detected: Expected object, received boolean at "devIndicators"`**
+Next 15 changed `devIndicators` from a boolean toggle to an object. Either remove the field (default behavior is fine — indicators only show in `next dev`) or pass `{ appIsrStatus: false, buildActivity: false }`. We just removed it from [next.config.mjs](frontend/next.config.mjs).
 
 **`next build` fails locally with "Page X is missing generateStaticParams"**
 The page is either a client component (`"use client"`) — generateStaticParams can't live there — or it returns an empty array (Next 15.1 quirk). See [Dynamic routes under static export](#dynamic-routes-under-static-export) for the page/`_client.tsx` split pattern.

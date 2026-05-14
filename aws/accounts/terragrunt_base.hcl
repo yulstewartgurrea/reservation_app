@@ -45,6 +45,14 @@ remote_state {
     key     = format("%s/terraform.tfstate", path_relative_to_include())
     bucket  = format("terraform-states-%s-%s", local.account_vars.account_id, local.region_vars.aws_region)
     profile = local.resolved_profile
+
+    # The state bucket is bootstrap infra — its SSE / root-access / TLS-enforcement
+    # policies are configured once during setup (via the admin profile locally).
+    # CI deploy roles only have state read/write perms, so don't try to re-enforce
+    # these every run.
+    skip_bucket_ssencryption  = true
+    skip_bucket_root_access   = true
+    skip_bucket_enforced_tls  = true
   }
   generate = {
     path      = "_backend.tf"

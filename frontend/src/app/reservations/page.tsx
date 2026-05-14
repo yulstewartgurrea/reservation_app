@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { Suspense, useEffect, useMemo, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { CalendarCheck2 } from "lucide-react";
 import { api } from "@/lib/api";
@@ -65,7 +65,7 @@ const SUCCESS_MSG: Record<DialogKind, string> = {
   refund: "Refund issued.",
 };
 
-export default function ReservationsPage() {
+function ReservationsPageInner() {
   const router = useRouter();
   const { user, fetchMe } = useAuth();
   const searchParams = useSearchParams();
@@ -368,6 +368,14 @@ export default function ReservationsPage() {
 
       <Toast toast={toast} onDismiss={() => setToast(null)} />
     </div>
+  );
+}
+
+export default function ReservationsPage() {
+  return (
+    <Suspense fallback={<p className="py-12 text-center text-sm text-slate-500">Loading…</p>}>
+      <ReservationsPageInner />
+    </Suspense>
   );
 }
 
