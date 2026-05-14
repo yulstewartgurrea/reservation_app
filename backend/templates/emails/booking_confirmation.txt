@@ -11,4 +11,4 @@ Address: {{ shop.address_line }}, {{ shop.city }}
 
 You can manage this booking at: {{ frontend_url }}/reservations
 
-— Reserva
+— BookMe

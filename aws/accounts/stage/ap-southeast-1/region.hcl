@@ -19,7 +19,7 @@ locals {
   # send to. Add more recipients to `additional_verified_emails` for testing.
   verified_email             = "yulgurz@gmail.com"
   additional_verified_emails = []
-  from_email_display         = "Reserva <yulgurz@gmail.com>"
+  from_email_display         = "BookMe <yulgurz@gmail.com>"
   write_smtp_creds_to_ssm    = true
 
   # ---------------------------------------------------------------------------

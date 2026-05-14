@@ -6,4 +6,4 @@ A friendly reminder from {{ shop.name }}: it's been about {{ reminder.interval_m
 
 {% endif %}Book here: {{ frontend_url }}/shops/{{ shop.id }}
 
-— Reserva
+— BookMe

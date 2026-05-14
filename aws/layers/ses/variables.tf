@@ -19,7 +19,7 @@ variable "additional_verified_emails" {
 }
 
 variable "from_email_display" {
-  description = "Display form of the From: header, e.g. 'Reserva <noreply@example.com>'. If empty, falls back to the verified_email."
+  description = "Display form of the From: header, e.g. 'BookMe <noreply@example.com>'. If empty, falls back to the verified_email."
   type        = string
   default     = ""
 }

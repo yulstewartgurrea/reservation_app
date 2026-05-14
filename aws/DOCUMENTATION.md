@@ -345,7 +345,7 @@ parameters under `/<project>/<env>/ses/*` that the ECS task reads as the `EMAIL_
 | `…/ses/smtp_username` | `EMAIL_HOST_USER` | IAM access key id |
 | `…/ses/smtp_password` | `EMAIL_HOST_PASSWORD` | SES SMTPv4-derived password (SecureString) |
 | `…/ses/email_use_tls` | `EMAIL_USE_TLS` | `True` |
-| `…/ses/default_from_email` | `DEFAULT_FROM_EMAIL` | `Reserva <verified-address>` |
+| `…/ses/default_from_email` | `DEFAULT_FROM_EMAIL` | `BookMe <verified-address>` |
 
 The v4 password derivation is handled by the AWS provider via
 `aws_iam_access_key.smtp.ses_smtp_password_v4` — no manual HMAC scripting required.

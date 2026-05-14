@@ -72,7 +72,7 @@ locals {
   ssm_prefix   = "/${var.project_name}/${var.env}/ses"
   smtp_host    = "email-smtp.${data.aws_region.current.name}.amazonaws.com"
   smtp_port    = "587"
-  default_from = length(var.from_email_display) > 0 ? var.from_email_display : "Reserva <${var.verified_email}>"
+  default_from = length(var.from_email_display) > 0 ? var.from_email_display : "BookMe <${var.verified_email}>"
 }
 
 resource "aws_ssm_parameter" "smtp_host" {
