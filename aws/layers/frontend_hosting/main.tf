@@ -84,6 +84,39 @@ locals {
 # CloudFront VPC Origin — gives the distribution a route into the VPC so it can
 # reach the internal ALB without ever making the ALB internet-facing. Requires
 # AWS provider ≥ 5.74 (see versions_override.tf).
+# Viewer-request URL rewriter: maps /verify-otp → /verify-otp.html so direct hits
+# / refreshes / external links to static pages get the right S3 object instead of
+# falling through to the SPA /index.html fallback (which then crashes because the
+# root redirects to /shops). Dynamic routes (/shops/123) still flow through the
+# 403/404 → /index.html fallback for client-side routing.
+resource "aws_cloudfront_function" "rewrite_html" {
+  name    = "rewrite-html-${var.project_name}-${var.env}"
+  runtime = "cloudfront-js-2.0"
+  comment = "Rewrite extensionless URIs to .html for static Next.js export"
+  publish = true
+  code    = <<-EOT
+    function handler(event) {
+      var req = event.request;
+      var uri = req.uri;
+
+      // Don't rewrite API or WebSocket paths (those go to the ALB origin).
+      if (uri.startsWith('/api/') || uri.startsWith('/ws/')) {
+        return req;
+      }
+
+      // Already has a file extension (.html/.js/.css/.png/...) — pass through.
+      if (/\.[a-zA-Z0-9]+$/.test(uri)) {
+        return req;
+      }
+
+      // Trim trailing slash, then map "" -> "/index.html" and "/<page>" -> "/<page>.html".
+      var trimmed = uri.endsWith('/') ? uri.slice(0, -1) : uri;
+      req.uri = trimmed === '' ? '/index.html' : trimmed + '.html';
+      return req;
+    }
+  EOT
+}
+
 resource "aws_cloudfront_vpc_origin" "backend" {
   count = local.has_backend ? 1 : 0
 
@@ -139,6 +172,11 @@ resource "aws_cloudfront_distribution" "frontend" {
 
     # AWS-managed "CachingOptimized" policy — handles GET caching with sensible defaults.
     cache_policy_id = local.managed_caching_optimized_policy_id
+
+    function_association {
+      event_type   = "viewer-request"
+      function_arn = aws_cloudfront_function.rewrite_html.arn
+    }
   }
 
   # /api/* → Django HTTP. No caching (responses are user-specific / dynamic);
