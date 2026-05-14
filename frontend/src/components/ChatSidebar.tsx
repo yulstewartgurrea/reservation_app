@@ -165,9 +165,9 @@ export function ChatSidebar() {
         <div className="mb-3 flex items-center justify-between gap-2">
           <button
             type="button"
-            onClick={() => router.push("/shops")}
+            onClick={() => router.back()}
             className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-2.5 py-1 text-xs font-medium text-slate-600 shadow-sm hover:bg-slate-50"
-            aria-label="Back to shops"
+            aria-label="Go back"
           >
             <ArrowLeft size={14} />
             Back

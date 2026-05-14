@@ -54,14 +54,30 @@ export type ChatRoomEvent =
       is_typing: boolean;
     };
 
+export type ChatAttachmentKind = "image" | "video" | "file";
+
 export type ChatMessage = {
   id: number;
   room_id: number;
   sender_id: number;
   body: string;
+  attachment_url: string | null;
+  attachment_kind: ChatAttachmentKind | null;
+  attachment_name: string | null;
+  attachment_size: number | null;
+  attachment_mime: string | null;
   created_at: string;
   edited_at: string | null;
 };
+
+/** Prepend the API base to a relative URL (e.g. `/media/...`) so it can be
+ * loaded from any origin. Absolute URLs pass through unchanged. */
+export function absUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url)) return url;
+  const base = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
+  return `${base}${url.startsWith("/") ? "" : "/"}${url}`;
+}
 
 export function connectChatRoom(
   roomId: number,

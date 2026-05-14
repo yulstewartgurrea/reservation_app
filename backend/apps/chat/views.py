@@ -48,18 +48,27 @@ class ChatRoomViewSet(viewsets.ReadOnlyModelViewSet):
         if request.method == "GET":
             qs = Message.objects.filter(room=room).order_by("created_at")
             page = self.paginate_queryset(qs)
-            ser = MessageSerializer(page or qs, many=True)
+            ctx = {"request": request}
+            ser = MessageSerializer(page or qs, many=True, context=ctx)
             return self.get_paginated_response(ser.data) if page is not None else Response(ser.data)
-        # POST: send a message
+        # POST: send a message (multipart-aware so clients can attach files)
         s = SendMessageSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         try:
-            msg = services.send_message(room=room, sender=request.user, body=s.validated_data["body"])
+            msg = services.send_message(
+                room=room,
+                sender=request.user,
+                body=s.validated_data.get("body", ""),
+                attachment=s.validated_data.get("attachment"),
+            )
         except ValueError as exc:
             raise ValidationError(str(exc))
         except PermissionError as exc:
             raise PermissionDenied(str(exc))
-        return Response(MessageSerializer(msg).data, status=status.HTTP_201_CREATED)
+        return Response(
+            MessageSerializer(msg, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=True, methods=["post"], url_path="read")
     def mark_read(self, request, pk=None):

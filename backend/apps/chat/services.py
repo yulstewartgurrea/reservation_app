@@ -53,15 +53,45 @@ def get_participant(*, room: ChatRoom, user) -> ChatParticipant:
 
 # --- messaging ------------------------------------------------------------
 
-def send_message(*, room: ChatRoom, sender, body: str) -> Message:
+_IMAGE_MIMES = {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "image/heic"}
+_VIDEO_MIMES = {"video/mp4", "video/webm", "video/quicktime", "video/ogg"}
+# 25MB ceiling — large enough for short clips, small enough to keep storage costs sane.
+_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+
+
+def _classify_attachment(file) -> tuple[str, str]:
+    """Return (kind, mime). `kind` is one of Message.AttachmentKind values."""
+    mime = (getattr(file, "content_type", "") or "").lower()
+    if mime in _IMAGE_MIMES:
+        return Message.AttachmentKind.IMAGE, mime
+    if mime in _VIDEO_MIMES:
+        return Message.AttachmentKind.VIDEO, mime
+    return Message.AttachmentKind.FILE, mime or "application/octet-stream"
+
+
+def send_message(*, room: ChatRoom, sender, body: str, attachment=None) -> Message:
     if not user_can_access_room(sender, room):
         raise PermissionError("Not a participant of this room.")
     body = (body or "").strip()
-    if not body:
-        raise ValueError("Message body cannot be empty.")
+    if not body and not attachment:
+        raise ValueError("Message must have a body or an attachment.")
+
+    attach_kwargs: dict = {}
+    if attachment is not None:
+        size = getattr(attachment, "size", 0) or 0
+        if size > _MAX_ATTACHMENT_BYTES:
+            raise ValueError("Attachment is too large (25MB max).")
+        kind, mime = _classify_attachment(attachment)
+        attach_kwargs = {
+            "attachment": attachment,
+            "attachment_kind": kind,
+            "attachment_name": getattr(attachment, "name", "") or "",
+            "attachment_size": size,
+            "attachment_mime": mime,
+        }
 
     with transaction.atomic():
-        msg = Message.objects.create(room=room, sender=sender, body=body)
+        msg = Message.objects.create(room=room, sender=sender, body=body, **attach_kwargs)
         ChatRoom.objects.filter(pk=room.pk).update(last_message_at=msg.created_at)
         # Sender has implicitly read their own message
         ChatParticipant.objects.filter(room=room, user=sender).update(last_read_message=msg)
@@ -258,6 +288,11 @@ def _serialize(msg: Message) -> dict:
         "room_id": msg.room_id,
         "sender_id": msg.sender_id,
         "body": msg.body,
+        "attachment_url": msg.attachment.url if msg.attachment else None,
+        "attachment_kind": msg.attachment_kind or None,
+        "attachment_name": msg.attachment_name or None,
+        "attachment_size": msg.attachment_size,
+        "attachment_mime": msg.attachment_mime or None,
         "edited_at": msg.edited_at.isoformat() if msg.edited_at else None,
         "created_at": msg.created_at.isoformat(),
     }

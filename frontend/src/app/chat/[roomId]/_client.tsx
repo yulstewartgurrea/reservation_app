@@ -3,12 +3,15 @@
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowLeft, MoreVertical, Send } from "lucide-react";
+import { ArrowLeft, MoreVertical, Paperclip, Send, Smile, X } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { formatApiError } from "@/lib/errors";
 import { connectChatRoom, connectNotifications, sendTyping, type ChatMessage } from "@/lib/ws";
 import { Avatar } from "@/components/Avatar";
+import { ChatAttachment } from "@/components/ChatAttachment";
+import { EmojiPicker } from "@/components/EmojiPicker";
+import { Linkify } from "@/components/Linkify";
 import { Toast, ToastMessage } from "@/components/Toast";
 
 type Room = {
@@ -82,13 +85,20 @@ export default function ChatRoomPage() {
   const [otherTyping, setOtherTyping] = useState(false);
   const [otherOnline, setOtherOnline] = useState(false);
   const [otherLastSeen, setOtherLastSeen] = useState<string | null>(null);
+  const [pickedFile, setPickedFile] = useState<File | null>(null);
+  const [pickedPreview, setPickedPreview] = useState<string | null>(null);
+  const [showEmoji, setShowEmoji] = useState(false);
 
   const listRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const otherTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isTypingRef = useRef(false);
+
+  // 25MB ceiling, matched against the backend limit.
+  const MAX_FILE_BYTES = 25 * 1024 * 1024;
 
   useEffect(() => {
     fetchMe();
@@ -220,17 +230,73 @@ export default function ChatRoomPage() {
     if (listRef.current) {
       listRef.current.scrollTop = listRef.current.scrollHeight;
     }
-  }, [messages.length]);
+  }, [messages.length, otherTyping]);
+
+  function clearPickedFile() {
+    setPickedFile(null);
+    if (pickedPreview) URL.revokeObjectURL(pickedPreview);
+    setPickedPreview(null);
+    if (fileInputRef.current) fileInputRef.current.value = "";
+  }
+
+  function onPickFile(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    if (file.size > MAX_FILE_BYTES) {
+      setToast({ variant: "error", message: "File is too large (25MB max)." });
+      e.target.value = "";
+      return;
+    }
+    setPickedFile(file);
+    if (file.type.startsWith("image/") || file.type.startsWith("video/")) {
+      setPickedPreview(URL.createObjectURL(file));
+    } else {
+      setPickedPreview(null);
+    }
+  }
+
+  function insertEmoji(emoji: string) {
+    const el = inputRef.current;
+    if (!el) {
+      setInput((prev) => prev + emoji);
+      return;
+    }
+    const start = el.selectionStart ?? input.length;
+    const end = el.selectionEnd ?? input.length;
+    const next = input.slice(0, start) + emoji + input.slice(end);
+    setInput(next);
+    // Restore caret position after React updates the value.
+    requestAnimationFrame(() => {
+      el.focus();
+      const pos = start + emoji.length;
+      el.setSelectionRange(pos, pos);
+      autosize(el);
+    });
+  }
 
   async function send(e?: React.FormEvent) {
     e?.preventDefault();
     const body = input.trim();
-    if (!body || sending) return;
+    if (sending) return;
+    if (!body && !pickedFile) return;
     setSending(true);
     try {
-      const { data } = await api.post(`/chat/rooms/${roomId}/messages/`, { body });
+      let data;
+      if (pickedFile) {
+        const fd = new FormData();
+        if (body) fd.append("body", body);
+        fd.append("attachment", pickedFile);
+        const res = await api.post(`/chat/rooms/${roomId}/messages/`, fd, {
+          headers: { "Content-Type": "multipart/form-data" },
+        });
+        data = res.data;
+      } else {
+        const res = await api.post(`/chat/rooms/${roomId}/messages/`, { body });
+        data = res.data;
+      }
       setMessages((prev) => (prev.some((m) => m.id === data.id) ? prev : [...prev, data]));
       setInput("");
+      clearPickedFile();
       stopTyping();
       if (inputRef.current) inputRef.current.style.height = "auto";
     } catch (err) {
@@ -329,7 +395,14 @@ export default function ChatRoomPage() {
             {room?.other_party_name ?? "Chat"}
           </h1>
           {otherTyping ? (
-            <p className="truncate text-xs font-medium text-brand-600">typing…</p>
+            <p className="flex items-center gap-1.5 truncate text-xs font-medium text-brand-600">
+              typing
+              <span className="flex items-end gap-0.5" aria-hidden>
+                <span className="chat-typing-dot" />
+                <span className="chat-typing-dot" />
+                <span className="chat-typing-dot" />
+              </span>
+            </p>
           ) : otherOnline ? (
             <p className="truncate text-xs text-emerald-600">Online</p>
           ) : (
@@ -415,7 +488,23 @@ export default function ChatRoomPage() {
                       </div>
                     ) : (
                       <>
-                        <p className="whitespace-pre-wrap break-words">{m.body}</p>
+                        {m.attachment_url && (
+                          <div className={m.body ? "mb-2" : ""}>
+                            <ChatAttachment
+                              url={m.attachment_url}
+                              kind={m.attachment_kind}
+                              name={m.attachment_name}
+                              size={m.attachment_size}
+                              mine={mine}
+                            />
+                          </div>
+                        )}
+                        {m.body && (
+                          <Linkify
+                            text={m.body}
+                            className="block whitespace-pre-wrap break-words"
+                          />
+                        )}
                         <div
                           className={`mt-1 flex items-center justify-end gap-1 text-[10px] ${
                             mine ? "text-white/80" : "text-slate-400"
@@ -477,36 +566,120 @@ export default function ChatRoomPage() {
             );
           })
         )}
+        {otherTyping && (
+          <div className="flex items-end gap-2">
+            <Avatar name={room?.other_party_name ?? "?"} size="sm" className="mb-1" />
+            <div className="rounded-2xl rounded-bl-sm bg-white px-3.5 py-2.5 text-slate-500 shadow-sm">
+              <span className="sr-only">{room?.other_party_name ?? "Someone"} is typing</span>
+              <span className="flex items-end gap-1" aria-hidden>
+                <span className="chat-typing-dot" />
+                <span className="chat-typing-dot" />
+                <span className="chat-typing-dot" />
+              </span>
+            </div>
+          </div>
+        )}
       </div>
 
       <form
         onSubmit={send}
-        className="flex items-end gap-2 border-t border-slate-200 bg-white px-4 py-3"
+        className="border-t border-slate-200 bg-white px-4 py-3"
       >
-        <textarea
-          ref={inputRef}
-          value={input}
-          onChange={(e) => {
-            const next = e.target.value;
-            setInput(next);
-            autosize(e.currentTarget);
-            if (next.trim()) emitTyping();
-            else stopTyping();
-          }}
-          onBlur={stopTyping}
-          onKeyDown={onInputKeyDown}
-          placeholder="Type your message…"
-          rows={1}
-          className="max-h-36 flex-1 resize-none rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-brand-500 focus:bg-white focus:outline-none"
-        />
-        <button
-          type="submit"
-          disabled={!input.trim() || sending}
-          aria-label="Send message"
-          className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-brand-600 text-white shadow-sm hover:bg-brand-700 disabled:opacity-50"
-        >
-          <Send size={18} />
-        </button>
+        {pickedFile && (
+          <div className="mb-2 flex items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 p-2">
+            {pickedPreview && pickedFile.type.startsWith("image/") ? (
+              // eslint-disable-next-line @next/next/no-img-element
+              <img
+                src={pickedPreview}
+                alt={pickedFile.name}
+                className="h-14 w-14 rounded object-cover"
+              />
+            ) : pickedPreview && pickedFile.type.startsWith("video/") ? (
+              <video
+                src={pickedPreview}
+                className="h-14 w-14 rounded bg-black object-cover"
+                muted
+              />
+            ) : (
+              <div className="flex h-14 w-14 items-center justify-center rounded bg-slate-200 text-xs font-medium text-slate-600">
+                FILE
+              </div>
+            )}
+            <div className="min-w-0 flex-1">
+              <p className="truncate text-sm font-medium text-slate-800">
+                {pickedFile.name}
+              </p>
+              <p className="text-xs text-slate-500">
+                {(pickedFile.size / 1024 / 1024).toFixed(2)} MB
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={clearPickedFile}
+              aria-label="Remove attachment"
+              className="inline-flex h-8 w-8 items-center justify-center rounded-full text-slate-500 hover:bg-slate-200"
+            >
+              <X size={16} />
+            </button>
+          </div>
+        )}
+        <div className="relative flex items-end gap-2">
+          <div className="relative">
+            <button
+              type="button"
+              onClick={() => setShowEmoji((v) => !v)}
+              aria-label="Insert emoji"
+              className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100"
+            >
+              <Smile size={20} />
+            </button>
+            {showEmoji && (
+              <EmojiPicker
+                onPick={(e) => insertEmoji(e)}
+                onClose={() => setShowEmoji(false)}
+              />
+            )}
+          </div>
+          <button
+            type="button"
+            onClick={() => fileInputRef.current?.click()}
+            aria-label="Attach file"
+            className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100"
+          >
+            <Paperclip size={20} />
+          </button>
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*,video/*,application/pdf,application/zip,application/msword,application/vnd.openxmlformats-officedocument.wordprocessingml.document,text/plain"
+            className="hidden"
+            onChange={onPickFile}
+          />
+          <textarea
+            ref={inputRef}
+            value={input}
+            onChange={(e) => {
+              const next = e.target.value;
+              setInput(next);
+              autosize(e.currentTarget);
+              if (next.trim()) emitTyping();
+              else stopTyping();
+            }}
+            onBlur={stopTyping}
+            onKeyDown={onInputKeyDown}
+            placeholder="Type your message…"
+            rows={1}
+            className="max-h-36 flex-1 resize-none rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-brand-500 focus:bg-white focus:outline-none"
+          />
+          <button
+            type="submit"
+            disabled={(!input.trim() && !pickedFile) || sending}
+            aria-label="Send message"
+            className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-brand-600 text-white shadow-sm hover:bg-brand-700 disabled:opacity-50"
+          >
+            <Send size={18} />
+          </button>
+        </div>
       </form>
 
       <Toast toast={toast} onDismiss={() => setToast(null)} />

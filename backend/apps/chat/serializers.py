@@ -8,6 +8,7 @@ from .services import unread_count_for_room
 class MessageSerializer(serializers.ModelSerializer):
     sender_id = serializers.IntegerField(read_only=True)
     sender_name = serializers.SerializerMethodField()
+    attachment_url = serializers.SerializerMethodField()
 
     class Meta:
         model = Message
@@ -17,6 +18,11 @@ class MessageSerializer(serializers.ModelSerializer):
             "sender_id",
             "sender_name",
             "body",
+            "attachment_url",
+            "attachment_kind",
+            "attachment_name",
+            "attachment_size",
+            "attachment_mime",
             "edited_at",
             "is_deleted",
             "created_at",
@@ -26,6 +32,11 @@ class MessageSerializer(serializers.ModelSerializer):
             "room",
             "sender_id",
             "sender_name",
+            "attachment_url",
+            "attachment_kind",
+            "attachment_name",
+            "attachment_size",
+            "attachment_mime",
             "edited_at",
             "is_deleted",
             "created_at",
@@ -34,6 +45,15 @@ class MessageSerializer(serializers.ModelSerializer):
     def get_sender_name(self, obj) -> str:
         u = obj.sender
         return (u.get_full_name() or u.email).strip()
+
+    def get_attachment_url(self, obj):
+        if not obj.attachment:
+            return None
+        request = self.context.get("request")
+        url = obj.attachment.url
+        if request is not None:
+            return request.build_absolute_uri(url)
+        return url
 
 
 class ChatRoomSerializer(serializers.ModelSerializer):
@@ -125,7 +145,15 @@ class OpenRoomSerializer(serializers.Serializer):
 
 
 class SendMessageSerializer(serializers.Serializer):
-    body = serializers.CharField(max_length=4000)
+    body = serializers.CharField(max_length=4000, required=False, allow_blank=True)
+    attachment = serializers.FileField(required=False, allow_null=True)
+
+    def validate(self, attrs):
+        body = (attrs.get("body") or "").strip()
+        attachment = attrs.get("attachment")
+        if not body and not attachment:
+            raise serializers.ValidationError("Message must have a body or an attachment.")
+        return attrs
 
 
 class EditMessageSerializer(serializers.Serializer):
