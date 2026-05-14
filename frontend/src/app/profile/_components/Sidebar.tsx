@@ -74,8 +74,18 @@ export function ProfileSidebar({
       </Section>
 
       <Section title="Activity">
-        <NavItem href="/reservations" icon={CalendarDays} label="My bookings" active={false} />
-        <NavItem href="/favorites" icon={Heart} label="Favorites" active={false} />
+        <NavItem
+          href="/profile/bookings"
+          icon={CalendarDays}
+          label="My bookings"
+          active={isActive("/profile/bookings")}
+        />
+        <NavItem
+          href="/profile/favorites"
+          icon={Heart}
+          label="Favorites"
+          active={isActive("/profile/favorites")}
+        />
         <NavItem href="/chat" icon={MessageSquare} label="Messages" active={false} />
       </Section>
 
