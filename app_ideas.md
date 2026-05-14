@@ -241,7 +241,8 @@ With branches: `cancelled_by_customer`, `cancelled_by_shop`, `no_show`, `resched
 - ✅ Per-shop analytics endpoint + dashboard page (revenue, completion + no-show rate, top services)
 - ✅ Code-quality round: shared `core/emails.py`, `HoursEditor` + `SlotPicker` components, `formatApiError` helper, configurable `FRONTEND_URL`
 - ✅ Test coverage: payments lifecycle + webhook signing, account tokens, shop hours + availability overrides
-- ✅ Customer ↔ shop chat (real-time via Channels, edit messages, mark-unread-from, per-room unread badges + global nav badge) — see §8.13 for design notes
+- ✅ Customer ↔ shop chat (real-time via Channels, edit messages, mark-unread-from, per-room unread badges + global nav badge) — see §8.14 for design notes
+- ✅ Live typing indicator + online presence on the chat list and inside a conversation (Redis-backed TTL'd presence; fan-out scoped to chat peers)
 - ⏳ Deposits / customer-initiated refunds
 - ⏳ SMS reminders (Twilio)
 - ⏳ Native mobile app (React Native, sharing the API)
@@ -320,7 +321,13 @@ No online payments in v1. **Pay on arrival** only. Stripe integration is deferre
 - **Refunds (deferred):** PayMongo supports refunds via API but a full refund policy / partial refund flow is Phase 3.
 - **Currency:** PHP only in v1 (PayMongo's only supported currency).
 
-### 8.13 Chat (customer ↔ shop)
+### 8.13 Notifications — email-only, SMS deferred
+- **Email is the universal channel.** Signup verification (6-digit OTP), booking confirmations, 24h + 1h appointment reminders, and shop-owner maintenance reminders all go through Django's email pipeline. Free, no per-message cost, and works for every user with a registered email.
+- **Why SMS is deferred:** Even PH-native providers (Semaphore, PhilSMS) cost ₱0.50+/SMS; Twilio is ~5× that. At commission-only margins, eating SMS cost for reminders is a no-go. If a shop later asks for SMS, the right shape is a prepaid credit wallet they top up — the platform passes through cost + a small markup. WhatsApp Cloud API (Meta) is the most likely first-paid-channel since 1k service conversations/month are free and PH adoption is high.
+- **Signup OTP, not link.** Plain 6-digit code emailed at registration (10-min TTL, 5-attempt cap, 60s resend cooldown, hashed at rest). Verify endpoint returns JWT pair on success — one round-trip from signup to logged-in. The legacy link-based `verify-email` endpoint stays for backwards compatibility.
+- **Maintenance reminders are shop-owned, customer-targeted.** Shop owner creates a `MaintenanceReminder` (customer email, service, title, `interval_months`, `next_due_at`). Hourly Beat task dispatches due reminders by email + in-app `Notification`, then advances `next_due_at` by `interval_months`. Customer must be a registered Reserva user to receive one (no cold outreach).
+
+### 8.14 Chat (customer ↔ shop)
 - **One conversation per (customer, shop) pair.** No group chats, no DMs between customers. The shop owner replies as themselves; multiple owners are out of scope (one owner per shop in v1).
 - **Customer initiates.** A "Chat" button on the active shop's detail page opens or re-opens the room (idempotent get-or-create). Shop owners cannot start cold conversations.
 - **Storage stays in Postgres** even though chat is the highest-write surface. At this app's scale this is fine — Discord ran chat on Postgres for billions of messages before sharding. The index `(room_id, created_at)` keeps the message-list query trivial.
@@ -330,7 +337,9 @@ No online payments in v1. **Pay on arrival** only. Stripe integration is deferre
 - **Reads are tracked by a per-user cursor** (`ChatParticipant.last_read_message`) pointing at the highest message seen. Unread = messages in the room past the cursor that the user didn't send. This is cheaper than per-message read receipts and makes "mark unread" trivial.
 - **"Mark unread from here" rewinds the cursor** to the predecessor of the chosen message (or null if it's the first message in the room). The target and everything after re-enter the unread tally — and the room jumps back to the top of the chat list.
 - **Edits are allowed indefinitely; soft-delete is in the model but no UI yet.** Edit sets `edited_at`; the body cannot become empty. Only the sender can edit (enforced in the service layer).
-- **Writes always go through REST.** The WebSocket is read-only (broadcasts only). Keeps auth + validation in one place and avoids state divergence between socket and REST clients.
+- **Writes always go through REST.** The chat WebSocket is broadcast-only for persistent state (messages, edits, read cursor). The one upstream message we accept is `{type: "typing"}` — it's transient by definition and carries no data worth durably storing, so the round-trip-via-REST cost is not justified.
+- **Online presence is Redis-backed.** A connected `UserNotificationConsumer` sets `presence:user:<id>` with a 60s TTL and refreshes it every 25s. On disconnect we wait a 5s grace period (absorbs page navigations and reloads) and then check whether *another* of the user's sockets has refreshed the key — only if no socket is left does the user flip offline. Presence transitions fan out as `presence.update` events to every chat peer (users sharing at least one `ChatRoom`); peers outside that set don't see the user as online because there's no surface that would display them. `User.last_seen_at` is updated on each transition so "Last seen 10m ago" works after the user goes offline.
+- **Typing indicator fan-out hits two groups.** The chat consumer broadcasts `chat.typing` into `chat.room.<id>` (for anyone with the room open, including the sender — the frontend filters its own echo) **and** into the other party's `user.<id>` group (so the sidebar can switch the row preview to "typing…" without anyone having to be on the chat page). A 3s client-side idle timer auto-emits `is_typing: false` so a closed tab doesn't leave a stuck indicator.
 
 ---
 

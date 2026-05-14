@@ -182,7 +182,7 @@ jobs:
             .containerDefinitions = [
               (.containerDefinitions[] | select(.name == $name) | .image = $image
                 | .command = ["sh","-c","python manage.py migrate --noinput && python manage.py seed_categories"]
-                | .entryPoint = null
+                | del(.entryPoint)
                 | .portMappings = [])
             ] |
             del(.taskDefinitionArn, .revision, .status, .requiresAttributes,

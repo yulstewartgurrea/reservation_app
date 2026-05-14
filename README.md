@@ -107,6 +107,7 @@ All in `backend/.env` (mirrors `backend/.env.example`).
 | `DJANGO_SECRET_KEY` | dev-secret | Django signing key — set strong in prod |
 | `DJANGO_DEBUG` | `True` | Disable in prod |
 | `DJANGO_ALLOWED_HOSTS` | `localhost,127.0.0.1,web` | Comma-separated host allowlist |
+| `DJANGO_TIME_ZONE` | `Asia/Manila` | Operating region for shop hours / slot generation. Storage stays UTC; this only affects how naive local times are interpreted and rendered. |
 | `POSTGRES_DB` / `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_HOST` / `POSTGRES_PORT` | postgres / postgres / postgres / db / 5432 | DB connection |
 | `REDIS_URL` | `redis://redis:6379/0` | Channels layer |
 | `CELERY_BROKER_URL` | `redis://redis:6379/1` | Celery broker |
@@ -131,21 +132,23 @@ All in `backend/.env` (mirrors `backend/.env.example`).
 All routes are prefixed `/api/` unless noted. JWT required except where marked **public**.
 
 ### Auth (`/api/auth/`)
-- **public** `POST register/` — create account (returns User; verification email queued)
+- **public** `POST register/` — create account (User created; a 6-digit OTP is emailed; client is expected to call `verify-otp/` next)
 - **public** `POST login/` — JWT pair
 - **public** `POST refresh/` — refresh JWT
 - `GET / PATCH me/` — current user
-- **public** `POST verify-email/` `{token}` — confirm email
-- `POST resend-verification/` — re-send verification email
+- **public** `POST request-otp/` `{email}` — issue a fresh signup OTP (always 200 to avoid leaking which emails are registered; 429 if rate-limited)
+- **public** `POST verify-otp/` `{email, code}` — verify 6-digit OTP; on success returns `{access, refresh}` JWT pair and marks `email_verified_at`
+- **public** `POST verify-email/` `{token}` — legacy link-based confirm (kept for backwards compatibility)
+- `POST resend-verification/` — legacy: re-send link-based verification email
 - **public** `POST password/reset/` `{email}` — request reset (always 200, no enum)
 - **public** `POST password/reset/confirm/` `{token, new_password}` — apply reset
 
 ### Shops (`/api/shops/`)
-- **public** `GET /` — list active shops (search, filter by city/category, ordering)
+- **public** `GET /` — list active shops (paginated 12/page, `page_size` overridable up to 48; search, filter by city/category, ordering)
 - **public** `GET /<id>/` — shop detail (photos, weekday hours)
 - **public** `GET nearby/?lat&lng&radius_km` — Haversine search
 - **public** `GET categories/` — shop categories
-- `GET mine/` — owner's shops
+- `GET mine/` — owner's shops (paginated 12/page, `page_size` overridable up to 48)
 - `POST /` — create shop (auto-geocoded if lat/lng blank)
 - `PATCH /<id>/` — edit shop
 - `POST /<id>/publish/` · `POST /<id>/pause/` — toggle status
@@ -159,9 +162,13 @@ All routes are prefixed `/api/` unless noted. JWT required except where marked *
 ### Services (`/api/services/`)
 - **public** `GET /` (filter `shop`, `category`, `is_active`)
 - **public** `GET /<id>/`
-- **public** `GET discover/?q&city&category` — cross-shop search with shop info embedded
+- **public** `GET discover/?q&city&category` — cross-shop search with shop info embedded (paginated 12/page, `page_size` overridable up to 50)
 - **public** `GET categories/` — service categories
-- `POST /` · `PATCH /<id>/` (multipart for `photo`) · `DELETE /<id>/`
+- `POST /` · `PATCH /<id>/` · `DELETE /<id>/`
+- **public** `GET <id>/photos/` — list a service's gallery
+- `POST <id>/photos/` (multipart, owner-only) — upload a gallery photo (first upload becomes primary)
+- `DELETE <id>/photos/<photo_id>/` (owner-only) — remove a photo (next photo is auto-promoted if the deleted one was primary)
+- `POST <id>/photos/<photo_id>/primary/` (owner-only) — set a photo as the service's cover image
 
 ### Reservations (`/api/reservations/`)
 - **public** `GET availability/?shop&service&staff&date` — open slots (15-min granularity)
@@ -182,6 +189,7 @@ All routes are prefixed `/api/` unless noted. JWT required except where marked *
 - `GET /<id>/`
 - `POST /<id>/mark-read/`
 - `POST mark-all-read/`
+- Shop-owner only: `GET / POST / PATCH / DELETE maintenance-reminders/` — manage recurring email reminders for past customers (e.g. aircon cleaning every 6 months). Create payload: `{shop, customer_email, service?, title, message?, interval_months, next_due_at}`. The hourly Beat task `dispatch_due_maintenance_reminders` sends due reminders by email + in-app notification and rolls `next_due_at` forward.
 
 ### Payments (`/api/payments/`)
 - `POST reservations/<id>/checkout/` — customer; returns `{checkout_url, session_id, status}`
@@ -207,8 +215,8 @@ All routes are prefixed `/api/` unless noted. JWT required except where marked *
 - `GET commission/?period=YYYY-MM` — ledger rows + per-shop summary
 
 ### WebSocket
-- `ws://.../ws/notifications/?token=<jwt>` — auto-joins `user.<id>` group, plus `shop.<id>` for each owned shop. Server pushes `{kind, title, body, payload}` events. New chat messages are fanned out here as `kind="chat.new_message"` so badges update without a room socket open.
-- `ws://.../ws/chat/rooms/<id>/?token=<jwt>` — joins `chat.room.<id>`. Server pushes `chat.message`, `chat.message_edited`, and `chat.read_state` events for that room.
+- `ws://.../ws/notifications/?token=<jwt>` — auto-joins `user.<id>` group, plus `shop.<id>` for each owned shop. Server pushes `{kind, title, body, payload}` events. Kinds: `booking.*`, `reminder`, `chat.new_message`, `chat.typing`, `presence.update`. Connecting/disconnecting this socket is also what flips a user's online flag (Redis-backed presence with a short reconnect grace period); presence changes fan out to every chat peer.
+- `ws://.../ws/chat/rooms/<id>/?token=<jwt>` — joins `chat.room.<id>`. Server pushes `chat.message`, `chat.message_edited`, `chat.read_state`, and `chat.typing` events for that room. Client can send `{"type": "typing", "is_typing": true|false}` upstream; the server re-broadcasts to the room group and to the other party's `user.<id>` group (so the chat sidebar can react without an open room socket).
 
 ### Misc
 - `GET /health/` — orchestrator probe
@@ -229,7 +237,8 @@ Mobile-first responsive across the board. Role-gated where indicated.
 | `/register` | Register (customer or shop_owner) |
 | `/forgot-password` | Request reset link |
 | `/reset-password?token=…` | Set new password |
-| `/verify-email?token=…` | Email verification |
+| `/verify-email?token=…` | Email verification (legacy link-based) |
+| `/verify-otp?email=…` | 6-digit OTP verification (post-signup) |
 | `/shops` | Shop browse + "Find shops near me" |
 | `/shops/[id]` | Shop detail (photos, services, reviews) |
 | `/services` | Cross-shop service search |
@@ -258,6 +267,7 @@ Mobile-first responsive across the board. Role-gated where indicated.
 | `/dashboard/shops/[id]/staff/[staffId]/hours` | Per-staff weekly schedule |
 | `/dashboard/shops/[id]/photos` | Upload / delete shop photos |
 | `/dashboard/shops/[id]/analytics` | Revenue / no-show / top services |
+| `/dashboard/shops/[id]/reminders` | Maintenance reminders — schedule recurring email nudges to past customers |
 | `/dashboard/shops/[id]/walk-in` | Manual walk-in booking |
 | `/dashboard/shops/[id]/services/new` | Create service |
 | `/dashboard/shops/[id]/services/[serviceId]/edit` | Edit service + upload photo |
@@ -289,13 +299,15 @@ Below: each feature with where it lives in the code.
 ### Shops & services
 - Shop fields: name, description, address, lat/lng (auto-geocoded via [Nominatim](backend/apps/shops/geocoding.py)), hours, status, commission_rate (override), cancellation_window_hours
 - `WeekdayHours`, `HoursOverride`, `ShopPhoto`, `Staff`, `StaffWorkingHours`, `TimeBlock`
-- Service fields: name, description, duration_minutes, buffer_minutes, price, photo, eligible_staff
+- Service fields: name, description, duration_minutes, buffer_minutes, price, eligible_staff
+- Service photos: multi-image gallery via `ServicePhoto` (`POST/DELETE /api/services/<id>/photos/`, `POST /api/services/<id>/photos/<photo_id>/primary/` to pick the cover). At most one photo per service is primary (partial unique constraint); first upload is auto-primary, and deleting the primary auto-promotes the next photo by `sort_order`. The `cover_photo` field on the service serializer always returns the primary (or first by `sort_order` as fallback).
 - Publish / pause flows
 
 ### Discovery
 - `GET /api/shops/` — search + filter
 - `GET /api/shops/nearby/` — bounding-box pre-filter + Haversine distance, sorted by distance (no PostGIS)
 - `GET /api/services/discover/` — cross-shop search returning shop name + city embedded
+- `GET /api/services/?shop=<id>` — paginated services for a shop. Supports `?search=` (matches `name`/`description`), `?ordering=` (`name`, `-name`, `price`, `-price`, `duration_minutes`, `created_at`), and `?page_size=` (default 12, max 50). Public callers see active services only; the shop's owner also sees inactive rows so they can manage them.
 - Frontend "Find shops near me" via browser Geolocation API; falls back to plain list on denial
 
 ### Booking & availability
@@ -328,17 +340,37 @@ Below: each feature with where it lives in the code.
 - Shop-owner-side: **Refund** button on any paid reservation issues a full PayMongo refund and cancels the booking
 - **Payout model:** PayMongo has no Stripe-Connect equivalent — all customer payments land in the platform's PayMongo account, and the platform settles each shop's earnings (`gross − commission`) off-platform on a regular cadence
 
-### PayMongo setup
-1. Create a sandbox account at https://dashboard.paymongo.com.
-2. Copy your **secret + public** keys (test mode) into `backend/.env`:
+### PayMongo setup — what you need to do
+
+**Already done in code:** [PayMongo client](backend/apps/payments/paymongo.py), checkout endpoint, webhook receiver with HMAC-SHA256 verification, refund endpoint, dev-fake fallback when keys are empty, frontend "Pay now" button + redirect handling, success/cancel return pages — all wired and tested ([payments tests](backend/apps/payments/tests/test_payments.py)).
+
+**You need to do (one-time, to enable real payments):**
+
+1. **Sign up.** Create a PayMongo account at https://dashboard.paymongo.com (Philippines business details required for live mode; test mode works without).
+2. **Copy API keys.** In the dashboard: **Developers → API Keys** → copy the *test* secret + public keys into `backend/.env`:
    ```
    PAYMONGO_SECRET_KEY=sk_test_...
    PAYMONGO_PUBLIC_KEY=pk_test_...
    ```
-3. Add a webhook in the PayMongo dashboard pointing to `http(s)://<host>/api/payments/webhooks/paymongo/` and copy the signing secret to `PAYMONGO_WEBHOOK_SECRET`. For local dev, expose your container with ngrok or similar.
-4. Restart `web` and `worker`.
+3. **Expose your local backend for webhooks.** PayMongo's servers need to POST to your webhook URL. In a separate terminal:
+   ```bash
+   ngrok http 8000
+   ```
+   Copy the `https://<random>.ngrok-free.app` URL it prints.
+4. **Register the webhook.** In the dashboard: **Developers → Webhooks → Add webhook**:
+   - **URL:** `https://<random>.ngrok-free.app/api/payments/webhooks/paymongo/`
+   - **Events:** `checkout_session.payment.paid`, `checkout_session.payment.failed`, `payment.paid`, `payment.failed`
+   - Copy the **signing secret** PayMongo shows you into `backend/.env` as `PAYMONGO_WEBHOOK_SECRET=...`.
+5. **Restart the stack:**
+   ```bash
+   docker compose restart web worker
+   ```
+6. **Smoke test.** Make a booking, click *Pay now*, complete the test card flow (`4343 4343 4343 4345`, any future expiry, any CVC). Within a few seconds the reservation flips to `confirmed` and the Payment record to `paid`.
+7. **Going live.** When you're ready, swap `sk_test_` / `pk_test_` for `sk_live_` / `pk_live_`, register a *separate* live-mode webhook, and update `PAYMONGO_WEBHOOK_SECRET` to that live webhook's secret.
 
-If you skip steps 1–3, the client returns a fake checkout URL and `POST /api/payments/reservations/<id>/dev-confirm/` lets you simulate the webhook to drive the reservation to `confirmed` end-to-end.
+**If you skip steps 1–5** the system stays in dev-fake mode: the client returns a fake checkout URL and `POST /api/payments/reservations/<id>/dev-confirm/` lets you simulate the webhook to drive the reservation to `confirmed` end-to-end. The frontend handles this transparently.
+
+**Payout reminder.** PayMongo has no Stripe-Connect equivalent. All customer payments land in *your* PayMongo account; you settle each shop's earnings (`gross − commission`) off-platform on a regular cadence. See [app_ideas.md §8](app_ideas.md).
 
 ### Reviews
 - One review per completed reservation; server-side validation that the reservation is `completed` and belongs to the requester
@@ -353,10 +385,76 @@ If you skip steps 1–3, the client returns a fake checkout URL and `POST /api/p
 - Frontend [NotificationBell](frontend/src/components/NotificationBell.tsx) reads the WebSocket and renders an unread badge
 
 ### Email
-- HTML + text templates in [backend/templates/emails/](backend/templates/emails/): booking_confirmation, booking_reminder, verify_email, password_reset
-- Single helper: [apps/core/emails.py](backend/apps/core/emails.py) `send_template_email`
-- Celery tasks: `send_booking_confirmation_email` (signal-driven on create), `schedule_reminders` (24h + 1h via `apply_async(eta=…)`)
-- Dev uses Django console backend (logs to stdout); switch `EMAIL_BACKEND` for SMTP
+
+**Already done in code:**
+- HTML + text templates in [backend/templates/emails/](backend/templates/emails/): `booking_confirmation`, `booking_reminder`, `verify_email`, `password_reset`, `email_otp`, `maintenance_reminder`
+- Single helper: [apps/core/emails.py](backend/apps/core/emails.py) `send_template_email` (multipart MIME, never raises)
+- Account flow helpers: [apps/accounts/emails.py](backend/apps/accounts/emails.py) → `send_otp_email`, `send_verification_email`, `send_password_reset_email`
+- Celery tasks:
+  - `send_booking_confirmation_email` (signal-driven on create)
+  - `schedule_reminders` — queues 24h + 1h booking reminders on creation via `apply_async(eta=…)`
+  - `dispatch_due_maintenance_reminders` — hourly Beat sweep
+- Email OTP signup: [apps/accounts/otp.py](backend/apps/accounts/otp.py) issues a 6-digit code (10-min TTL, 5-attempt cap, 60s resend cooldown). Plaintext code is never persisted — only a hashed form
+
+**Signup → verify flow (already wired):**
+1. User submits `/register` form on the frontend (`frontend/src/app/register/page.tsx`).
+2. Backend creates the User and issues an OTP (`apps/accounts/views.py:RegisterView`), then emails it via `send_otp_email`.
+3. Frontend redirects to `/verify-otp?email=...`; user types the 6-digit code.
+4. `POST /api/auth/verify-otp/` validates the code, sets `email_verified_at`, and returns a JWT pair — user is logged in.
+5. Resend is rate-limited to once per 60 seconds.
+
+> A legacy *link-based* verification still exists (`POST /api/auth/verify-email/ {token}` + frontend `/verify-email?token=…`) and uses `send_verification_email`. It is wired but not the default path post-signup. Switch by sending the link in `RegisterView.perform_create` instead of the OTP if you prefer a link UX.
+
+**Forgot password flow (already wired):**
+1. User opens `/forgot-password`, enters their email.
+2. `POST /api/auth/password/reset/` always returns 200 (no account-existence enumeration); on hit, emails a 1-hour signed token link.
+3. User clicks the link → `/reset-password?token=…` → enters a new password → `POST /api/auth/password/reset/confirm/ {token, new_password}` applies it.
+4. Password tokens carry a fingerprint of the current password hash, so previously-issued tokens are invalidated as soon as the password changes.
+
+### Email setup — what you need to do
+
+**Dev (default):** Nothing. `EMAIL_BACKEND=console` prints every email to `docker compose logs web` so you can copy/paste OTPs and reset links during local testing.
+
+**Production (or you want real inboxes during staging):**
+
+#### Recipe A — Gmail SMTP (fastest, fine for personal/staging)
+1. Turn on 2-Step Verification on the Google account: https://myaccount.google.com/security
+2. Create an **App password** (16 chars, no spaces): https://myaccount.google.com/apppasswords
+3. Replace the Email block in `backend/.env` with:
+   ```
+   EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
+   EMAIL_HOST=smtp.gmail.com
+   EMAIL_PORT=587
+   EMAIL_HOST_USER=your-gmail-address@gmail.com
+   EMAIL_HOST_PASSWORD=xxxx xxxx xxxx xxxx
+   EMAIL_USE_TLS=True
+   DEFAULT_FROM_EMAIL=Reserva <your-gmail-address@gmail.com>
+   ```
+4. `docker compose restart web worker`.
+5. Smoke test: register a new account; the OTP email should land within a few seconds. Cap: ~500 sends/day for free Gmail.
+
+#### Recipe B — AWS SES (production)
+1. **Verify a sender.** SES console → *Verified identities* → add either a single email (quick) or your domain (recommended; add the DKIM CNAMEs to Route 53).
+2. **Create SMTP credentials.** SES console → *SMTP settings* → *Create SMTP credentials*. This generates an IAM user with the SES SMTP password (NOT your regular IAM access key — they look similar but they're different).
+3. **Request production access.** Until you do, SES can only send to verified addresses. *Account dashboard* → *Request production access* (Amazon usually approves within 24h with a brief use-case description).
+4. Replace the Email block in `backend/.env` (substitute the region of your SES setup):
+   ```
+   EMAIL_BACKEND=django.core.mail.backends.smtp.EmailBackend
+   EMAIL_HOST=email-smtp.ap-southeast-1.amazonaws.com
+   EMAIL_PORT=587
+   EMAIL_HOST_USER=AKIA...                  # SES SMTP username
+   EMAIL_HOST_PASSWORD=...                  # SES SMTP password
+   EMAIL_USE_TLS=True
+   DEFAULT_FROM_EMAIL=Reserva <noreply@yourdomain.com>
+   ```
+5. `docker compose restart web worker` and smoke test.
+
+**`FRONTEND_URL` must point at the public frontend** (`https://app.example.com` in prod) so the verify/reset links in emails work. It defaults to `http://localhost:3000`.
+
+### Maintenance reminders (shop-set recurring nudges)
+- `MaintenanceReminder` model in [apps/notifications/models.py](backend/apps/notifications/models.py): shop owner picks a past customer + service, sets a title (e.g. "Aircon cleaning"), interval months, and first due date
+- Hourly Beat task dispatches due reminders via email and an in-app `Notification`; idempotent because `next_due_at` advances after each send
+- Shop owner UI: `/dashboard/shops/[id]/reminders` lists + creates + pauses + deletes reminders
 
 ### Admin dashboard
 - [overview](frontend/src/app/admin/page.tsx): shop counts (total/active/pending/paused), reservation counts, commission totals
@@ -380,7 +478,9 @@ If you skip steps 1–3, the client returns a fake checkout URL and `POST /api/p
 - Unread count per room = messages in the room past your read cursor that you didn't send.
 - "Mark unread from here" rewinds the read cursor to the predecessor of the chosen message, so the target and everything after re-enter the unread tally.
 - Real-time fan-out: writes go through REST; the service layer broadcasts `chat.message` / `chat.message_edited` / `chat.read_state` events to the `chat.room.<id>` channel group, and a lightweight `chat.new_message` notification to each recipient's `user.<id>` group so the nav badge updates without an open room socket.
-- Frontend: [/chat](frontend/src/app/chat/page.tsx) list with unread badges, [/chat/[roomId]](frontend/src/app/chat/[roomId]/page.tsx) conversation view, [ChatBadge](frontend/src/components/ChatBadge.tsx) in the nav.
+- Typing indicator: the open chat room sends `{type: "typing", is_typing: bool}` upstream on every keystroke (debounced, idle-clears after 3s). [chat/consumers.py](backend/apps/chat/consumers.py) fans it out as `chat.typing` to both the room group **and** the other party's `user.<id>` channel — so it shows as "typing…" both inside the conversation and in the sidebar row of users not currently in the room.
+- Online presence: [chat/presence.py](backend/apps/chat/presence.py) tracks each connected user via a TTL'd Redis key (`presence:user:<id>`, refreshed by a heartbeat from `UserNotificationConsumer`). On connect/disconnect — debounced by a short grace period to absorb refreshes — a `presence.update` event fans out to every chat peer (users who share at least one `ChatRoom`), so green dots and "Last seen …" labels stay live without polling. `ChatRoomSerializer` also includes `other_party_online` / `other_party_last_seen_at` for cold loads. `User.last_seen_at` is updated when a presence transition occurs.
+- Frontend: [/chat](frontend/src/app/chat/page.tsx) list with unread badges, online dots, and live "typing…" preview; [/chat/[roomId]](frontend/src/app/chat/[roomId]/page.tsx) conversation view with header presence + typing indicator; [ChatBadge](frontend/src/components/ChatBadge.tsx) in the nav.
 
 ### Mobile-first responsive UI
 - Tailwind mobile-first breakpoints, 44px min touch targets, viewport meta with `width=device-width`
@@ -418,9 +518,12 @@ Test settings module: [config/test_settings.py](backend/config/test_settings.py)
 | [reservations/tests/test_lifecycle.py](backend/apps/reservations/tests/test_lifecycle.py) | pending creation + history row, conflict detection, walk-in commission exclusion, commission rate (shop override + platform default), strike accrual + restriction, reschedule moves times + rejects on completed |
 | [payments/tests/test_payments.py](backend/apps/payments/tests/test_payments.py) | dev-mode fake checkout URL, idempotent `start_checkout`, `mark_paid` auto-confirms reservation, valid + invalid PayMongo webhook signatures, checkout endpoint authorization, dev-confirm helper |
 | [accounts/tests/test_tokens.py](backend/apps/accounts/tests/test_tokens.py) | email-token round trip + expiry, password-token round trip, password-change invalidates outstanding reset tokens, verify-email endpoint, reset-request doesn't leak account existence, reset-confirm enforces minimum length |
+| [accounts/tests/test_otp.py](backend/apps/accounts/tests/test_otp.py) | OTP code generation + hashed persistence, prior unconsumed codes invalidated, resend cooldown, expiry, attempt cap, consumed-once semantics, register endpoint sends OTP, verify-otp endpoint returns JWTs + marks `email_verified_at`, request-otp doesn't leak unknown emails or re-send to already-verified users |
+| [notifications/tests.py](backend/apps/notifications/tests.py) | inbox API + signal-driven creation; maintenance-reminder CRUD (owner-only, cross-shop blocked, unknown customer rejected, customer role forbidden, list scoped to own shops); dispatcher fires only due reminders, rolls `next_due_at` forward, skips inactive ones, and persists an in-app `Notification` row |
 | [shops/tests/test_hours_and_availability.py](backend/apps/shops/tests/test_hours_and_availability.py) | hours PUT permission checks, override marks day closed → 0 slots, override with narrower hours limits slots, no slots in the past |
 | [chat/tests/test_services.py](backend/apps/chat/tests/test_services.py) | get-or-create idempotency, only-customer-can-open + only on active shops, sender must be a participant, edit only your own message, unread arithmetic across rooms, mark-read forward / mark-unread rewind incl. first-message edge case |
 | [chat/tests/test_api.py](backend/apps/chat/tests/test_api.py) | open room (customer-only), list scoped to self, outsiders 404, send / list / edit / mark-read / mark-unread end-to-end, global unread-count, unauthenticated 401 |
+| [chat/tests/test_presence.py](backend/apps/chat/tests/test_presence.py) | presence helpers (`is_online`, bulk `online_user_ids`) against a fake redis, peer fan-out (`peers_to_notify` returns chat-room counterparts), `ChatRoomSerializer.other_party_*` fields, and `ChatRoomConsumer` typing fan-out (room group + recipient's `user.<id>` group) via `WebsocketCommunicator` |
 
 ---
 
@@ -722,6 +825,12 @@ Importing `next/constants` from `next.config.mjs` works locally (CommonJS resolu
 **`next dev` fails locally with "Page X is missing generateStaticParams" when visiting a real ID like `/shops/1`**
 You set `output: "export"` unconditionally and `next dev` is now rejecting any non-placeholder ID. Fix: make the `output: export` setting conditional on the build phase so dev mode keeps server-rendering — see [frontend/next.config.mjs](frontend/next.config.mjs) (it checks `phase === "phase-development-server"`).
 
+**Backend deploy fails in the `migrate` job with `Invalid type for parameter containerDefinitions[0].entryPoint, value: None, type: <class 'NoneType'>, valid types: <class 'list'>, <class 'tuple'>`**
+The migrate job clones the API task definition and tries to clear `entryPoint` so its own `command = ["sh","-c","python manage.py migrate ..."]` runs cleanly (the API task def sets `entrypoint = ["sh","-c"]` in [region.hcl](aws/accounts/stage/ap-southeast-1/region.hcl), which would otherwise produce `sh -c sh -c "..."`). Setting `.entryPoint = null` in jq produces `"entryPoint": null` in the JSON, and botocore rejects it client-side before the API call — the field must be a list or omitted entirely. Fix: use `del(.entryPoint)` in the jq filter (see [.github/workflows/backend-deploy.yml](.github/workflows/backend-deploy.yml)).
+
+**Customer-facing slot times are shifted by the UTC offset (e.g. shop sets 9 AM–5 PM, customer sees 5 PM–1 AM)**
+[backend/apps/reservations/availability.py](backend/apps/reservations/availability.py) calls `timezone.get_current_timezone()` to combine the shop's naive `WeekdayHours.open_time`/`close_time` with the booking date. That returns Django's `TIME_ZONE`, so if the project is set to `UTC` while owners enter hours in local time, the slots come out shifted by exactly the local offset. Fix: set `DJANGO_TIME_ZONE=Asia/Manila` (default) — DB storage stays UTC because `USE_TZ=True`, this only changes how naive `time` values are interpreted.
+
 ---
 
 ## Deferred to later phases
@@ -731,7 +840,7 @@ Intentionally not in v1 (see [app_ideas.md §7](app_ideas.md)):
 - Deposits / partial payment (full-amount checkout only)
 - Customer-initiated refund flow (currently shop-owner-only)
 - Assigning services to specific staff via UI (model + M2M exist; admin only)
-- SMS reminders (Twilio)
+- SMS reminders (held — held due to cost; see [app_ideas.md §8](app_ideas.md). Email + in-app notification cover signup OTP, appointment reminders, and recurring maintenance reminders today.)
 - Native mobile app (React Native sharing the API)
 - Multi-language / multi-currency (PayMongo is PHP-only anyway)
 - PostGIS geospatial migration (current Haversine + bounding box is fine for v1 scale)

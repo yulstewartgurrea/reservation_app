@@ -331,6 +331,34 @@ point here via `django-storages[s3]` (not wired in app code yet — when you wir
 `AWS_STORAGE_BUCKET_NAME` to the bucket and grant the task IAM role `s3:GetObject` / `s3:PutObject`
 on `arn:aws:s3:::s3-reservation-stage-media/*`).
 
+### `ses`
+
+**Creates** — verified SES email identity for the sender, IAM user with `ses:SendEmail` /
+`ses:SendRawEmail`, an IAM access key, and (when `write_smtp_creds_to_ssm = true`) seven SSM
+parameters under `/<project>/<env>/ses/*` that the ECS task reads as the `EMAIL_*` env vars:
+
+| SSM path | ECS env var | Purpose |
+|---|---|---|
+| `…/ses/email_backend` | `EMAIL_BACKEND` | `django.core.mail.backends.smtp.EmailBackend` |
+| `…/ses/smtp_host` | `EMAIL_HOST` | `email-smtp.<region>.amazonaws.com` |
+| `…/ses/smtp_port` | `EMAIL_PORT` | `587` |
+| `…/ses/smtp_username` | `EMAIL_HOST_USER` | IAM access key id |
+| `…/ses/smtp_password` | `EMAIL_HOST_PASSWORD` | SES SMTPv4-derived password (SecureString) |
+| `…/ses/email_use_tls` | `EMAIL_USE_TLS` | `True` |
+| `…/ses/default_from_email` | `DEFAULT_FROM_EMAIL` | `Reserva <verified-address>` |
+
+The v4 password derivation is handled by the AWS provider via
+`aws_iam_access_key.smtp.ses_smtp_password_v4` — no manual HMAC scripting required.
+
+**Sandbox vs production.** SES accounts start in sandbox: 200 sends/day, recipients must also be
+verified. Add test recipients via `additional_verified_emails` in `region.hcl`. Click the
+verification link AWS emails to each address. Request production access in the SES console when
+ready.
+
+**Apply order matters.** `ses` must apply before `ecs` (or before any `ecs` re-apply) — the ECS
+task's `secrets` block references the `/ses/*` SSM paths and will fail to start if they don't
+exist. See README "SES (transactional email) setup".
+
 ### `frontend_hosting`
 
 **Creates** — S3 bucket (private, OAC-locked) + CloudFront distribution + GitHub OIDC provider + per-env deploy IAM role.

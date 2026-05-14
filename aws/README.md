@@ -17,14 +17,18 @@ Infrastructure-as-code for deploying the reservation app to AWS. Adapted from th
   - `svc-ecs-reservation-stage-celery-beat` — Celery beat scheduler
 - **RDS PostgreSQL 17.4** — `db.t4g.micro`, single-AZ, encrypted at rest, db `reservation`
 - **ElastiCache Redis 7.1** — `cache.t3.micro`, TLS, used by Channels and Celery
+- **SES** — verified sender identity + SMTP IAM user; credentials piped into SSM at
+  `/reservation/stage/ses/*` and read by the ECS task as `EMAIL_*`
 - **SSM Parameter Store** — DB/Redis connection params + app config from `parameters/env.yaml`
 - **S3** — private bucket for media uploads
 - **Internal ALB** — fronts the API; reachable from inside the VPC
 
 **Region:** `ap-southeast-1` (Singapore — lowest-latency AWS region to Philippines).
 
-**Not included in this initial stage deploy:** CloudFront, Route 53, ACM certificates, SES, and
-the websocket public ALB. These all need a registered domain — see "Adding a domain later" below.
+**Not included in this initial stage deploy:** CloudFront, Route 53, ACM certificates, and the
+websocket public ALB. These all need a registered domain — see "Adding a domain later" below.
+SES is provisioned in **email-only** mode (single verified address); upgrade to domain
+verification once you have a hosted zone.
 
 ## Layout
 
@@ -48,7 +52,7 @@ aws/
 │           ├── ecs/terragrunt.hcl
 │           └── storage/terragrunt.hcl
 └── layers/
-    ├── networking/  ecr/  parameters/  rds/  redis/  ecs/  storage/
+    ├── networking/  ecr/  parameters/  rds/  redis/  ecs/  ses/  storage/
 ```
 
 ## Prerequisites
@@ -147,6 +151,65 @@ graph). To target one layer, `cd` into it (e.g. `cd networking/`) and run `terra
    ```
 
 The ECS task definition references `:latest`, so `--force-new-deployment` is the redeploy trigger.
+
+## SES (transactional email) setup
+
+The `ses` layer provisions a verified sender identity, an IAM user with `ses:SendRawEmail`,
+an access key, and writes the resulting SMTP credentials into SSM under
+`/reservation/<env>/ses/*`. The ECS task definition reads them from there as `EMAIL_*`.
+
+### First-time apply
+
+1. **Pick a sender.** Edit `accounts/stage/ap-southeast-1/region.hcl` and set
+   `verified_email` to whatever inbox you control (Gmail is fine for testing). Optionally
+   add test recipients in `additional_verified_emails` — required while the account is in
+   SES sandbox, because sandbox can only send TO verified addresses.
+2. **Apply the layer:**
+   ```bash
+   cd aws/accounts/stage/ap-southeast-1/ses
+   terragrunt apply
+   ```
+   Terraform creates the SES email identity. AWS emails you a verification link — **click it**
+   before sending any test mail, or send attempts will fail with `MessageRejected`.
+3. **Re-apply ECS** so the task definition picks up the new SSM secret paths:
+   ```bash
+   cd ../ecs
+   terragrunt apply
+   ```
+   Then force a new deployment:
+   ```bash
+   aws ecs update-service \
+     --cluster ecs-reservation-stage \
+     --service svc-ecs-reservation-stage-api \
+     --force-new-deployment \
+     --region ap-southeast-1 --profile reservation-stage
+   ```
+4. **Smoke test.** Hit the API's signup endpoint (or trigger any flow that calls
+   `send_template_email`); the recipient should receive the message within seconds.
+   Check CloudWatch logs of the `api` service if it doesn't land.
+
+### Going to production
+
+By default SES accounts are in **sandbox**: max 200 messages/day, only verified recipients.
+To leave sandbox, in the SES console click **Account dashboard → Request production access**
+(use the description: *"Transactional email for a reservation platform — signup OTPs, password
+reset links, booking confirmations; single-opt-in only, no marketing."*). Approval is usually
+under 24 hours.
+
+When you add a domain (post-Route53):
+- Add an `aws_ses_domain_identity` + `aws_ses_domain_dkim` to `layers/ses/main.tf`
+- Add the three DKIM CNAME records to your hosted zone
+- Switch `verified_email` over to an address on the verified domain (e.g. `noreply@yourdomain.com`)
+- Remove `additional_verified_emails` (no longer needed once out of sandbox)
+
+### Rotating SMTP credentials
+
+`terraform taint` the access key and re-apply:
+```bash
+cd aws/accounts/stage/ap-southeast-1/ses
+terragrunt apply -replace='aws_iam_access_key.smtp'
+cd ../ecs && terragrunt apply   # picks up the new password from SSM
+```
 
 ## Hitting the API
 
