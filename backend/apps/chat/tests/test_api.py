@@ -50,7 +50,8 @@ class ChatRoomAPITests(TestCase):
         self.assertEqual(send.status_code, 201)
         listed = self.client.get(f"/api/chat/rooms/{room.id}/messages/")
         self.assertEqual(listed.status_code, 200)
-        rows = listed.json().get("results") or listed.json()
+        payload = listed.json()
+        rows = payload.get("results") if isinstance(payload, dict) else payload
         self.assertEqual(len(rows), 1)
         self.assertEqual(rows[0]["body"], "hello")
 
