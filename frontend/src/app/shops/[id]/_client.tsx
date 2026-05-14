@@ -20,7 +20,7 @@ import { formatApiError } from "@/lib/errors";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { formatHours, WeekdayHoursRow } from "@/lib/format";
-import { PublicServiceCard } from "@/components/PublicServiceCard";
+import { PublicServicesPanel } from "./_components/PublicServicesPanel";
 
 type Shop = {
   id: number;
@@ -41,16 +41,6 @@ type Shop = {
   total_bookings: number | null;
 };
 
-type Service = {
-  id: number;
-  name: string;
-  description: string;
-  duration_minutes: number;
-  price: string;
-  cover_photo: string | null;
-  category_detail?: { id: number; name: string } | null;
-};
-
 type Review = {
   id: number;
   customer_name: string;
@@ -65,7 +55,6 @@ export default function ShopDetailPage() {
   const router = useRouter();
   const { user } = useAuth();
   const [shop, setShop] = useState<Shop | null>(null);
-  const [services, setServices] = useState<Service[]>([]);
   const [reviews, setReviews] = useState<Review[]>([]);
   const [favoriteId, setFavoriteId] = useState<number | null>(null);
   const [chatBusy, setChatBusy] = useState(false);
@@ -88,9 +77,6 @@ export default function ShopDetailPage() {
 
   useEffect(() => {
     api.get(`/shops/${params.id}/`).then((r) => setShop(r.data));
-    api
-      .get(`/services/`, { params: { shop: params.id } })
-      .then((r) => setServices(r.data.results ?? r.data));
     api
       .get(`/reviews/`, { params: { shop: params.id } })
       .then((r) => setReviews(r.data.results ?? r.data));
@@ -127,7 +113,7 @@ export default function ShopDetailPage() {
     setReviews(r.data.results ?? r.data);
   }
 
-  if (!shop) return <p className="py-8 text-sm text-slate-500">Loading…</p>;
+  if (!shop) return <ShopDetailSkeleton />;
 
   const isOwner = user?.id === shop.owner;
   const cover = shop.photos?.[0]?.image ?? null;
@@ -149,9 +135,9 @@ export default function ShopDetailPage() {
 
       {/* HERO CARD */}
       <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
-        <div className="grid gap-0 md:grid-cols-[2fr_3fr]">
-          {/* photo */}
-          <div className="relative aspect-[4/3] w-full bg-slate-100 md:aspect-auto md:min-h-[320px]">
+        <div className="flex flex-col md:flex-row">
+          {/* photo — fixed thumbnail size so a tall portrait doesn't dominate the hero */}
+          <div className="relative aspect-[16/9] w-full flex-shrink-0 bg-slate-100 md:aspect-square md:h-56 md:w-56 md:self-start md:m-5 md:rounded-xl md:overflow-hidden lg:h-64 lg:w-64">
             {cover ? (
               // eslint-disable-next-line @next/next/no-img-element
               <img
@@ -166,7 +152,7 @@ export default function ShopDetailPage() {
             )}
             {isOwner && (
               <Link
-                href={`/dashboard/shops/${shop.id}/photos`}
+                href={`/my-shops/${shop.id}/photos`}
                 className="absolute bottom-3 left-3 inline-flex items-center gap-1.5 rounded-md bg-white px-3 py-1.5 text-xs font-medium text-slate-700 shadow"
               >
                 <Pencil size={12} />
@@ -176,7 +162,7 @@ export default function ShopDetailPage() {
           </div>
 
           {/* info */}
-          <div className="flex flex-col gap-4 p-5 sm:p-6">
+          <div className="flex min-w-0 flex-1 flex-col gap-4 p-5 sm:p-6 md:pl-0">
             <div className="flex items-start justify-between gap-3">
               <span
                 className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${
@@ -218,7 +204,7 @@ export default function ShopDetailPage() {
                 )}
                 {isOwner && (
                   <Link
-                    href={`/dashboard/shops/${shop.id}`}
+                    href={`/my-shops/${shop.id}`}
                     className="inline-flex items-center gap-1.5 rounded-md bg-brand-600 px-3.5 py-1.5 text-sm font-medium text-white hover:bg-brand-700"
                   >
                     <Settings size={14} />
@@ -275,53 +261,11 @@ export default function ShopDetailPage() {
       </section>
 
       {/* SERVICES */}
-      <section className="rounded-2xl border border-slate-200 bg-white p-5">
-        <div className="mb-4 flex items-center justify-between">
-          <div>
-            <h2 className="text-xl font-semibold text-slate-900">Services</h2>
-            <p className="mt-0.5 text-sm text-slate-500">
-              {isOwner
-                ? "What customers can book at this shop."
-                : "Pick a service to book."}
-            </p>
-          </div>
-          {isOwner && (
-            <Link
-              href={`/dashboard/shops/${shop.id}`}
-              className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-            >
-              <Settings size={14} />
-              Manage services
-            </Link>
-          )}
-        </div>
-
-        {services.length === 0 ? (
-          <p className="rounded-lg border border-dashed border-slate-200 bg-slate-50 p-10 text-center text-sm text-slate-500">
-            No services yet.
-          </p>
-        ) : (
-          <ul className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4">
-            {services.map((s) => (
-              <PublicServiceCard
-                key={s.id}
-                hideShop
-                service={{
-                  id: s.id,
-                  name: s.name,
-                  duration_minutes: s.duration_minutes,
-                  price: s.price,
-                  cover_photo: s.cover_photo,
-                  shop_id: shop.id,
-                  shop_name: shop.name,
-                  shop_city: shop.city,
-                  category: s.category_detail?.name ?? null,
-                }}
-              />
-            ))}
-          </ul>
-        )}
-      </section>
+      <PublicServicesPanel
+        shopId={shop.id}
+        shopName={shop.name}
+        shopCity={shop.city}
+      />
 
       {/* BOTTOM ROW: business info + reviews */}
       <div className="grid gap-6 lg:grid-cols-2">
@@ -335,7 +279,7 @@ export default function ShopDetailPage() {
             </h2>
             {isOwner && (
               <Link
-                href={`/dashboard/shops/${shop.id}/edit`}
+                href={`/my-shops/${shop.id}/edit`}
                 className="rounded-md border border-slate-200 px-3 py-1 text-xs font-medium text-slate-700 hover:bg-slate-50"
               >
                 Edit
@@ -466,6 +410,30 @@ function InfoRow({
     <div className="flex items-start gap-3 text-sm">
       <Icon size={16} className="mt-0.5 flex-shrink-0 text-slate-400" />
       <div className="text-slate-700">{value}</div>
+    </div>
+  );
+}
+
+function ShopDetailSkeleton() {
+  return (
+    <div className="space-y-6 py-4" aria-hidden>
+      <div className="h-4 w-32 animate-pulse rounded bg-slate-200" />
+      <section className="overflow-hidden rounded-2xl border border-slate-200 bg-white">
+        <div className="flex flex-col md:flex-row">
+          <div className="aspect-[16/9] w-full flex-shrink-0 animate-pulse bg-slate-100 md:aspect-square md:h-56 md:w-56 md:m-5 md:rounded-xl lg:h-64 lg:w-64" />
+          <div className="min-w-0 flex-1 space-y-4 p-5 sm:p-6 md:pl-0">
+            <div className="h-5 w-20 animate-pulse rounded-full bg-slate-100" />
+            <div className="h-8 w-2/3 animate-pulse rounded bg-slate-200" />
+            <div className="h-4 w-1/2 animate-pulse rounded bg-slate-100" />
+            <div className="h-20 w-full animate-pulse rounded-lg bg-slate-100" />
+            <div className="grid grid-cols-3 gap-3 border-t border-slate-100 pt-4">
+              {Array.from({ length: 3 }).map((_, i) => (
+                <div key={i} className="h-10 w-full animate-pulse rounded bg-slate-100" />
+              ))}
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   );
 }

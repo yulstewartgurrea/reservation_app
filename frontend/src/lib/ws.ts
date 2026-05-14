@@ -46,6 +46,12 @@ export type ChatRoomEvent =
       type: "chat.read_state";
       user_id: number;
       last_read_message_id: number | null;
+    }
+  | {
+      type: "chat.typing";
+      room_id: number;
+      user_id: number;
+      is_typing: boolean;
     };
 
 export type ChatMessage = {
@@ -79,4 +85,13 @@ export function connectChatRoom(
   };
 
   return socket;
+}
+
+export function sendTyping(socket: WebSocket | null, isTyping: boolean): void {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  try {
+    socket.send(JSON.stringify({ type: "typing", is_typing: isTyping }));
+  } catch {
+    /* ignore */
+  }
 }

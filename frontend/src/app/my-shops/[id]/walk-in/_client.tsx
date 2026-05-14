@@ -2,9 +2,11 @@
 
 import { FormEvent, useEffect, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
+import { UserPlus } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatApiError } from "@/lib/errors";
 import { nowDatetimeLocal } from "@/lib/format";
+import { PageHeader } from "@/components/PageHeader";
 
 type Service = { id: number; name: string; duration_minutes: number; price: string };
 
@@ -39,7 +41,7 @@ export default function WalkInPage() {
         guest_name: form.guest_name,
         guest_phone: form.guest_phone,
       });
-      router.push(`/dashboard/shops/${id}`);
+      router.push(`/my-shops/${id}`);
     } catch (err) {
       setError(formatApiError(err, "Failed to create."));
     } finally {
@@ -48,13 +50,15 @@ export default function WalkInPage() {
   }
 
   return (
-    <div className="mx-auto max-w-xl py-6">
-      <h1 className="text-2xl font-semibold">Add walk-in</h1>
-      <p className="mt-1 text-sm text-slate-600">
-        Manually create a booking for an in-person customer. No account required — just enter their
-        name and phone.
-      </p>
-      <form onSubmit={onSubmit} className="mt-6 space-y-4">
+    <div className="mx-auto max-w-3xl py-6">
+      <PageHeader
+        backHref={`/my-shops/${id}`}
+        backLabel="Back to shop"
+        icon={UserPlus}
+        title="Add walk-in"
+        description="Manually create a booking for an in-person customer. No account required — just enter their name and phone."
+      />
+      <form onSubmit={onSubmit} className="space-y-4">
         <div>
           <label className="block text-sm font-medium">Service</label>
           <select

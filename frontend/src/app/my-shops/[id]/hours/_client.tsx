@@ -1,10 +1,10 @@
 "use client";
 
-import Link from "next/link";
 import { useParams } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
+import { Clock } from "lucide-react";
 import { api } from "@/lib/api";
 import { HoursEditor } from "@/components/HoursEditor";
+import { PageHeader } from "@/components/PageHeader";
 
 type ShopHoursRow = {
   weekday: number;
@@ -17,19 +17,13 @@ export default function ShopHoursPage() {
   const { id } = useParams<{ id: string }>();
 
   return (
-    <div className="mx-auto max-w-2xl py-6">
-      <div className="mb-4">
-        <Link
-          href={`/dashboard/shops/${id}`}
-          className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-        >
-          <ArrowLeft size={16} />
-          Back
-        </Link>
-      </div>
-      <HoursEditor<ShopHoursRow, ShopHoursRow>
+    <div className="mx-auto max-w-3xl py-6">
+      <PageHeader
+        icon={Clock}
         title="Shop hours"
         description="Customers can only book during open hours. Defaults to closed everywhere — flip days to open."
+      />
+      <HoursEditor<ShopHoursRow, ShopHoursRow>
         workingLabel="Open"
         load={async () => (await api.get(`/shops/${id}/hours/`)).data ?? []}
         save={async (rows) => {

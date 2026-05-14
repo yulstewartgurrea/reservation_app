@@ -3,12 +3,10 @@
 import { FormEvent, useState } from "react";
 import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
-import { useAuth } from "@/lib/auth";
 import { formatApiError } from "@/lib/errors";
 
 export default function RegisterPage() {
   const router = useRouter();
-  const login = useAuth((s) => s.login);
   const [form, setForm] = useState({
     email: "",
     username: "",
@@ -27,8 +25,7 @@ export default function RegisterPage() {
     setError(null);
     try {
       await api.post("/auth/register/", form);
-      await login(form.email, form.password);
-      router.push("/");
+      router.push(`/verify-otp?email=${encodeURIComponent(form.email)}`);
     } catch (err) {
       setError(formatApiError(err, "Failed to register."));
     } finally {

@@ -5,7 +5,7 @@ import { TopNav } from "@/components/TopNav";
 import { RegisterServiceWorker } from "@/components/RegisterServiceWorker";
 
 export const metadata: Metadata = {
-  title: "BookMo — Book services nearby",
+  title: "BookMe — Book services nearby",
   description: "Find and book services from local shops.",
   manifest: "/manifest.webmanifest",
   icons: {
@@ -14,7 +14,7 @@ export const metadata: Metadata = {
   },
   appleWebApp: {
     capable: true,
-    title: "BookMo",
+    title: "BookMe",
     statusBarStyle: "default",
   },
 };

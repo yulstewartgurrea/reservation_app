@@ -2,11 +2,13 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { ArrowLeft, MoreVertical, Send } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
 import { formatApiError } from "@/lib/errors";
-import { connectChatRoom, type ChatMessage } from "@/lib/ws";
+import { connectChatRoom, connectNotifications, sendTyping, type ChatMessage } from "@/lib/ws";
+import { Avatar } from "@/components/Avatar";
 import { Toast, ToastMessage } from "@/components/Toast";
 
 type Room = {
@@ -16,9 +18,51 @@ type Room = {
   shop_name: string;
   customer_name: string;
   other_party_name: string;
+  other_party_id: number | null;
+  other_party_online: boolean;
+  other_party_last_seen_at: string | null;
 };
 
+// How long after the last keystroke we keep firing "typing".
+const TYPING_IDLE_MS = 3000;
+
+function formatLastSeen(iso: string | null): string {
+  if (!iso) return "Offline";
+  const d = new Date(iso);
+  const now = new Date();
+  const diffMs = now.getTime() - d.getTime();
+  const min = Math.floor(diffMs / 60000);
+  if (min < 1) return "Last seen just now";
+  if (min < 60) return `Last seen ${min}m ago`;
+  const hr = Math.floor(min / 60);
+  if (hr < 24) return `Last seen ${hr}h ago`;
+  const day = Math.floor(hr / 24);
+  if (day < 7) return `Last seen ${day}d ago`;
+  return `Last seen ${d.toLocaleDateString([], { month: "short", day: "numeric" })}`;
+}
+
 type Message = ChatMessage & { sender_name?: string };
+
+function dayLabel(iso: string): string {
+  const d = new Date(iso);
+  const now = new Date();
+  const startOfDay = (x: Date) => new Date(x.getFullYear(), x.getMonth(), x.getDate()).getTime();
+  const diffDays = Math.round((startOfDay(now) - startOfDay(d)) / (24 * 60 * 60 * 1000));
+  if (diffDays === 0) return "Today";
+  if (diffDays === 1) return "Yesterday";
+  if (diffDays < 7) return d.toLocaleDateString([], { weekday: "long" });
+  return d.toLocaleDateString([], { month: "long", day: "numeric", year: "numeric" });
+}
+
+function sameDay(a: string, b: string): boolean {
+  const x = new Date(a);
+  const y = new Date(b);
+  return (
+    x.getFullYear() === y.getFullYear() &&
+    x.getMonth() === y.getMonth() &&
+    x.getDate() === y.getDate()
+  );
+}
 
 export default function ChatRoomPage() {
   const params = useParams<{ roomId: string }>();
@@ -35,8 +79,16 @@ export default function ChatRoomPage() {
   const [loading, setLoading] = useState(true);
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [menuFor, setMenuFor] = useState<number | null>(null);
+  const [otherTyping, setOtherTyping] = useState(false);
+  const [otherOnline, setOtherOnline] = useState(false);
+  const [otherLastSeen, setOtherLastSeen] = useState<string | null>(null);
 
   const listRef = useRef<HTMLDivElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  const typingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const otherTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isTypingRef = useRef(false);
 
   useEffect(() => {
     fetchMe();
@@ -62,6 +114,8 @@ export default function ChatRoomPage() {
         api.get(`/chat/rooms/${roomId}/messages/`),
       ]);
       setRoom(roomRes.data);
+      setOtherOnline(Boolean(roomRes.data?.other_party_online));
+      setOtherLastSeen(roomRes.data?.other_party_last_seen_at ?? null);
       const rows: Message[] = msgsRes.data.results ?? msgsRes.data;
       setMessages(rows);
       const last = rows[rows.length - 1];
@@ -83,16 +137,84 @@ export default function ChatRoomPage() {
         );
         if (evt.message.sender_id !== user?.id) {
           markReadUpTo(evt.message.id);
+          // A new message implicitly ends the typing indicator.
+          setOtherTyping(false);
+          if (otherTypingTimerRef.current) {
+            clearTimeout(otherTypingTimerRef.current);
+            otherTypingTimerRef.current = null;
+          }
         }
       } else if (evt.type === "chat.message_edited") {
         setMessages((prev) =>
           prev.map((m) => (m.id === evt.message.id ? { ...m, ...evt.message } : m))
         );
+      } else if (evt.type === "chat.typing") {
+        if (evt.user_id === user?.id) return; // ignore echo of our own typing
+        setOtherTyping(evt.is_typing);
+        if (otherTypingTimerRef.current) {
+          clearTimeout(otherTypingTimerRef.current);
+          otherTypingTimerRef.current = null;
+        }
+        if (evt.is_typing) {
+          // Auto-clear in case the "stopped" event never arrives (e.g. tab closed).
+          otherTypingTimerRef.current = setTimeout(() => setOtherTyping(false), TYPING_IDLE_MS + 1000);
+        }
       }
-      // chat.read_state could be used for read-receipts UI; not displayed in v1.
     });
-    return () => socket?.close();
+    socketRef.current = socket;
+    return () => {
+      socket?.close();
+      socketRef.current = null;
+      if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+      if (otherTypingTimerRef.current) clearTimeout(otherTypingTimerRef.current);
+    };
   }, [roomId, load, markReadUpTo, user?.id]);
+
+  // Presence updates for the other party arrive on the notifications socket,
+  // not the room socket — we subscribe here too so the header dot stays live.
+  useEffect(() => {
+    const otherId = room?.other_party_id ?? null;
+    if (!otherId) return;
+    const sock = connectNotifications((n) => {
+      if (n.kind === "presence.update") {
+        const payload = n.payload as {
+          user_id?: number;
+          is_online?: boolean;
+          last_seen_at?: string | null;
+        };
+        if (payload?.user_id === otherId) {
+          setOtherOnline(Boolean(payload.is_online));
+          if (payload.last_seen_at !== undefined) {
+            setOtherLastSeen(payload.last_seen_at ?? null);
+          }
+        }
+      }
+    });
+    return () => sock?.close();
+  }, [room?.other_party_id]);
+
+  const emitTyping = useCallback(() => {
+    if (!isTypingRef.current) {
+      isTypingRef.current = true;
+      sendTyping(socketRef.current, true);
+    }
+    if (typingTimerRef.current) clearTimeout(typingTimerRef.current);
+    typingTimerRef.current = setTimeout(() => {
+      isTypingRef.current = false;
+      sendTyping(socketRef.current, false);
+    }, TYPING_IDLE_MS);
+  }, []);
+
+  const stopTyping = useCallback(() => {
+    if (typingTimerRef.current) {
+      clearTimeout(typingTimerRef.current);
+      typingTimerRef.current = null;
+    }
+    if (isTypingRef.current) {
+      isTypingRef.current = false;
+      sendTyping(socketRef.current, false);
+    }
+  }, []);
 
   useEffect(() => {
     if (listRef.current) {
@@ -100,21 +222,34 @@ export default function ChatRoomPage() {
     }
   }, [messages.length]);
 
-  async function send(e: React.FormEvent) {
-    e.preventDefault();
-    if (!input.trim() || sending) return;
+  async function send(e?: React.FormEvent) {
+    e?.preventDefault();
+    const body = input.trim();
+    if (!body || sending) return;
     setSending(true);
     try {
-      const { data } = await api.post(`/chat/rooms/${roomId}/messages/`, { body: input });
-      setMessages((prev) =>
-        prev.some((m) => m.id === data.id) ? prev : [...prev, data]
-      );
+      const { data } = await api.post(`/chat/rooms/${roomId}/messages/`, { body });
+      setMessages((prev) => (prev.some((m) => m.id === data.id) ? prev : [...prev, data]));
       setInput("");
+      stopTyping();
+      if (inputRef.current) inputRef.current.style.height = "auto";
     } catch (err) {
       setToast({ variant: "error", message: formatApiError(err, "Failed to send.") });
     } finally {
       setSending(false);
     }
+  }
+
+  function onInputKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      send();
+    }
+  }
+
+  function autosize(el: HTMLTextAreaElement) {
+    el.style.height = "auto";
+    el.style.height = `${Math.min(el.scrollHeight, 140)}px`;
   }
 
   function startEdit(m: Message) {
@@ -146,132 +281,196 @@ export default function ChatRoomPage() {
     }
   }
 
+  const grouped = useMemo(() => {
+    const out: Array<{ key: string; type: "day" | "msg"; msg?: Message; label?: string }> = [];
+    let prev: Message | null = null;
+    for (const m of messages) {
+      if (!prev || !sameDay(prev.created_at, m.created_at)) {
+        out.push({ key: `d-${m.id}`, type: "day", label: dayLabel(m.created_at) });
+      }
+      out.push({ key: `m-${m.id}`, type: "msg", msg: m });
+      prev = m;
+    }
+    return out;
+  }, [messages]);
+
   if (!user) {
     return (
-      <p className="rounded-md border border-dashed border-slate-200 bg-white p-6 text-center text-sm text-slate-500">
-        Please sign in to view this chat.
-      </p>
+      <div className="flex flex-1 items-center justify-center p-6">
+        <p className="rounded-md border border-dashed border-slate-200 bg-white p-6 text-center text-sm text-slate-500">
+          Please sign in to view this chat.
+        </p>
+      </div>
     );
   }
 
   return (
-    <div className="flex h-[calc(100vh-12rem)] flex-col">
-      <header className="flex items-center justify-between border-b border-slate-200 pb-3">
-        <div className="min-w-0">
-          <Link href="/chat" className="text-xs text-slate-500 hover:underline">
-            ← All chats
-          </Link>
-          <h1 className="truncate text-lg font-semibold">
+    <div className="flex h-full flex-col">
+      <header className="flex items-center gap-3 border-b border-slate-200 bg-white px-4 py-3">
+        <Link
+          href="/chat"
+          className="inline-flex h-9 w-9 items-center justify-center rounded-full text-slate-500 hover:bg-slate-100 md:hidden"
+          aria-label="Back to chats"
+        >
+          <ArrowLeft size={18} />
+        </Link>
+        <div className="relative">
+          <Avatar name={room?.other_party_name ?? "?"} size="md" />
+          {otherOnline && (
+            <span
+              aria-label="Online"
+              title="Online"
+              className="absolute -bottom-0.5 -right-0.5 inline-block h-3 w-3 rounded-full border-2 border-white bg-emerald-500"
+            />
+          )}
+        </div>
+        <div className="min-w-0 flex-1">
+          <h1 className="truncate text-base font-semibold text-slate-900">
             {room?.other_party_name ?? "Chat"}
           </h1>
+          {otherTyping ? (
+            <p className="truncate text-xs font-medium text-brand-600">typing…</p>
+          ) : otherOnline ? (
+            <p className="truncate text-xs text-emerald-600">Online</p>
+          ) : (
+            <p className="truncate text-xs text-slate-500">
+              {formatLastSeen(otherLastSeen)}
+            </p>
+          )}
         </div>
       </header>
 
       <div
         ref={listRef}
-        className="flex-1 space-y-2 overflow-y-auto py-4"
+        className="flex-1 space-y-1 overflow-y-auto bg-slate-50 px-4 py-4"
         onClick={() => setMenuFor(null)}
       >
         {loading ? (
           <p className="text-sm text-slate-500">Loading…</p>
         ) : messages.length === 0 ? (
-          <p className="rounded-md border border-dashed border-slate-200 bg-white p-6 text-center text-sm text-slate-500">
-            No messages yet. Say hello.
-          </p>
+          <div className="flex h-full items-center justify-center">
+            <p className="rounded-md border border-dashed border-slate-200 bg-white p-6 text-center text-sm text-slate-500">
+              No messages yet. Say hello.
+            </p>
+          </div>
         ) : (
-          messages.map((m) => {
+          grouped.map((item) => {
+            if (item.type === "day") {
+              return (
+                <div key={item.key} className="my-3 flex justify-center">
+                  <span className="rounded-full bg-slate-200/70 px-3 py-1 text-[11px] font-medium text-slate-600">
+                    {item.label}
+                  </span>
+                </div>
+              );
+            }
+            const m = item.msg!;
             const mine = m.sender_id === user.id;
             const isEditing = editingId === m.id;
             return (
               <div
-                key={m.id}
-                className={`flex ${mine ? "justify-end" : "justify-start"}`}
+                key={item.key}
+                className={`group flex items-end gap-2 ${
+                  mine ? "justify-end" : "justify-start"
+                }`}
               >
-                <div
-                  className={`relative max-w-[80%] rounded-lg px-3 py-2 text-sm ${
-                    mine
-                      ? "bg-brand-600 text-white"
-                      : "border border-slate-200 bg-white text-slate-900"
-                  }`}
-                >
-                  {isEditing ? (
-                    <div className="space-y-2">
-                      <textarea
-                        value={editingBody}
-                        onChange={(e) => setEditingBody(e.target.value)}
-                        rows={2}
-                        className="w-full resize-none rounded border border-slate-300 px-2 py-1 text-sm text-slate-900"
-                        autoFocus
-                      />
-                      <div className="flex justify-end gap-2 text-xs">
-                        <button
-                          onClick={() => {
-                            setEditingId(null);
-                            setEditingBody("");
-                          }}
-                          className="rounded px-2 py-1 hover:bg-black/10"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          onClick={saveEdit}
-                          disabled={!editingBody.trim()}
-                          className="rounded bg-white px-2 py-1 text-brand-700 disabled:opacity-50"
-                        >
-                          Save
-                        </button>
-                      </div>
-                    </div>
-                  ) : (
-                    <>
-                      <p className="whitespace-pre-wrap break-words">{m.body}</p>
-                      <div className="mt-1 flex items-center gap-1 text-[10px] opacity-80">
-                        <span>
-                          {new Date(m.created_at).toLocaleTimeString([], {
-                            hour: "numeric",
-                            minute: "2-digit",
-                          })}
-                        </span>
-                        {m.edited_at && <span>· edited</span>}
-                      </div>
-                      <button
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          setMenuFor(menuFor === m.id ? null : m.id);
-                        }}
-                        aria-label="Message actions"
-                        className={`absolute -top-2 ${
-                          mine ? "left-[-22px]" : "right-[-22px]"
-                        } rounded-full bg-white/90 px-1.5 py-0.5 text-xs text-slate-700 shadow opacity-0 group-hover:opacity-100 ${
-                          menuFor === m.id ? "opacity-100" : ""
-                        }`}
-                      >
-                        ⋯
-                      </button>
-                      {menuFor === m.id && (
-                        <div
-                          onClick={(e) => e.stopPropagation()}
-                          className={`absolute z-10 mt-1 w-44 rounded-md border border-slate-200 bg-white text-left text-sm text-slate-700 shadow-lg ${
-                            mine ? "right-0 top-full" : "left-0 top-full"
-                          }`}
-                        >
-                          {mine && (
-                            <button
-                              onClick={() => startEdit(m)}
-                              className="block w-full px-3 py-2 text-left hover:bg-slate-50"
-                            >
-                              Edit message
-                            </button>
-                          )}
+                {!mine && (
+                  <Avatar name={room?.other_party_name ?? "?"} size="sm" className="mb-1" />
+                )}
+                <div className={`relative max-w-[75%] ${mine ? "items-end" : "items-start"}`}>
+                  <div
+                    className={`relative rounded-2xl px-3.5 py-2 text-sm shadow-sm ${
+                      mine
+                        ? "rounded-br-sm bg-brand-600 text-white"
+                        : "rounded-bl-sm bg-white text-slate-900"
+                    }`}
+                  >
+                    {isEditing ? (
+                      <div className="space-y-2">
+                        <textarea
+                          value={editingBody}
+                          onChange={(e) => setEditingBody(e.target.value)}
+                          rows={2}
+                          className="w-full resize-none rounded border border-slate-300 px-2 py-1 text-sm text-slate-900"
+                          autoFocus
+                        />
+                        <div className="flex justify-end gap-2 text-xs">
                           <button
-                            onClick={() => markUnreadHere(m)}
-                            className="block w-full px-3 py-2 text-left hover:bg-slate-50"
+                            onClick={() => {
+                              setEditingId(null);
+                              setEditingBody("");
+                            }}
+                            className="rounded px-2 py-1 hover:bg-black/10"
                           >
-                            Mark as unread from here
+                            Cancel
+                          </button>
+                          <button
+                            onClick={saveEdit}
+                            disabled={!editingBody.trim()}
+                            className="rounded bg-white px-2 py-1 text-brand-700 disabled:opacity-50"
+                          >
+                            Save
                           </button>
                         </div>
+                      </div>
+                    ) : (
+                      <>
+                        <p className="whitespace-pre-wrap break-words">{m.body}</p>
+                        <div
+                          className={`mt-1 flex items-center justify-end gap-1 text-[10px] ${
+                            mine ? "text-white/80" : "text-slate-400"
+                          }`}
+                        >
+                          <span>
+                            {new Date(m.created_at).toLocaleTimeString([], {
+                              hour: "numeric",
+                              minute: "2-digit",
+                            })}
+                          </span>
+                          {m.edited_at && <span>· edited</span>}
+                        </div>
+                      </>
+                    )}
+                  </div>
+
+                  {!isEditing && (
+                    <button
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setMenuFor(menuFor === m.id ? null : m.id);
+                      }}
+                      aria-label="Message actions"
+                      className={`absolute top-1 ${
+                        mine ? "-left-7" : "-right-7"
+                      } inline-flex h-6 w-6 items-center justify-center rounded-full bg-white text-slate-500 opacity-0 shadow-sm transition-opacity hover:bg-slate-100 group-hover:opacity-100 ${
+                        menuFor === m.id ? "opacity-100" : ""
+                      }`}
+                    >
+                      <MoreVertical size={14} />
+                    </button>
+                  )}
+                  {menuFor === m.id && (
+                    <div
+                      onClick={(e) => e.stopPropagation()}
+                      className={`absolute z-10 mt-1 w-48 rounded-md border border-slate-200 bg-white text-left text-sm text-slate-700 shadow-lg ${
+                        mine ? "right-0 top-full" : "left-0 top-full"
+                      }`}
+                    >
+                      {mine && (
+                        <button
+                          onClick={() => startEdit(m)}
+                          className="block w-full px-3 py-2 text-left hover:bg-slate-50"
+                        >
+                          Edit message
+                        </button>
                       )}
-                    </>
+                      <button
+                        onClick={() => markUnreadHere(m)}
+                        className="block w-full px-3 py-2 text-left hover:bg-slate-50"
+                      >
+                        Mark as unread from here
+                      </button>
+                    </div>
                   )}
                 </div>
               </div>
@@ -282,21 +481,31 @@ export default function ChatRoomPage() {
 
       <form
         onSubmit={send}
-        className="flex items-center gap-2 border-t border-slate-200 pt-3"
+        className="flex items-end gap-2 border-t border-slate-200 bg-white px-4 py-3"
       >
-        <input
-          type="text"
+        <textarea
+          ref={inputRef}
           value={input}
-          onChange={(e) => setInput(e.target.value)}
-          placeholder="Write a message…"
-          className="flex-1 rounded-md border border-slate-300 px-3 py-2 text-sm focus:border-brand-500 focus:outline-none"
+          onChange={(e) => {
+            const next = e.target.value;
+            setInput(next);
+            autosize(e.currentTarget);
+            if (next.trim()) emitTyping();
+            else stopTyping();
+          }}
+          onBlur={stopTyping}
+          onKeyDown={onInputKeyDown}
+          placeholder="Type your message…"
+          rows={1}
+          className="max-h-36 flex-1 resize-none rounded-2xl border border-slate-200 bg-slate-50 px-4 py-2.5 text-sm focus:border-brand-500 focus:bg-white focus:outline-none"
         />
         <button
           type="submit"
           disabled={!input.trim() || sending}
-          className="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700 disabled:opacity-50"
+          aria-label="Send message"
+          className="inline-flex h-11 w-11 shrink-0 items-center justify-center rounded-full bg-brand-600 text-white shadow-sm hover:bg-brand-700 disabled:opacity-50"
         >
-          Send
+          <Send size={18} />
         </button>
       </form>
 

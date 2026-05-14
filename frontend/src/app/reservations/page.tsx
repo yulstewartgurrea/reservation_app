@@ -1,9 +1,12 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { CalendarCheck2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { useAuth } from "@/lib/auth";
+// Note: shop owners are redirected from this page to /my-shops because they
+// manage bookings per-shop now. The customer "My bookings" view stays here.
 import { formatApiError } from "@/lib/errors";
 import {
   CardAction,
@@ -11,6 +14,7 @@ import {
   ReservationRow,
 } from "@/components/ReservationCard";
 import { ConfirmationDialog } from "@/components/ConfirmationDialog";
+import { PageHeader } from "@/components/PageHeader";
 import { Toast, ToastMessage } from "@/components/Toast";
 import { formatBookingTime } from "@/lib/format";
 
@@ -64,12 +68,17 @@ const SUCCESS_MSG: Record<DialogKind, string> = {
 export default function ReservationsPage() {
   const router = useRouter();
   const { user, fetchMe } = useAuth();
+  const searchParams = useSearchParams();
+  const focusParam = searchParams.get("focus");
+  const focusId = focusParam ? Number(focusParam) : null;
+
   const [items, setItems] = useState<ReservationRow[]>([]);
   const [reviewedIds, setReviewedIds] = useState<Set<number>>(new Set());
   const [loading, setLoading] = useState(true);
   const [tab, setTab] = useState<Tab>("all");
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [dialog, setDialog] = useState<PendingDialog | null>(null);
+  const [highlightedId, setHighlightedId] = useState<number | null>(null);
 
   useEffect(() => {
     fetchMe();
@@ -79,11 +88,38 @@ export default function ReservationsPage() {
 
   const isOwner = user?.role === "shop_owner";
 
-  // Default tab: pending for owners (action-oriented), all for customers (browse).
+  // Shop owners manage reservations per-shop under /my-shops/<id>/reservations.
+  // If one lands here directly (old bookmark, browser back), bounce them to
+  // their shops list rather than showing a duplicate cross-shop inbox.
+  useEffect(() => {
+    if (isOwner) {
+      router.replace("/my-shops");
+    }
+  }, [isOwner, router]);
+
+  // Default tab for the customer view; owners never reach this since they
+  // get redirected above.
   useEffect(() => {
     if (isOwner && tab === "all") setTab("pending");
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOwner]);
+
+  // When arriving from a notification (?focus=<id>), make sure the row is
+  // visible (switch to "all" so filters don't hide it), then scroll to it and
+  // apply a brief ring highlight.
+  useEffect(() => {
+    if (!focusId || loading || items.length === 0) return;
+    if (!items.some((r) => r.id === focusId)) return;
+    if (tab !== "all") setTab("all");
+    const el = document.getElementById(`reservation-${focusId}`);
+    if (el) {
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+    }
+    setHighlightedId(focusId);
+    const timer = window.setTimeout(() => setHighlightedId(null), 2500);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [focusId, loading, items]);
 
   async function load() {
     setLoading(true);
@@ -242,14 +278,17 @@ export default function ReservationsPage() {
 
   return (
     <div className="space-y-4 py-4">
-      <header>
-        <h1 className="text-2xl font-semibold">{isOwner ? "Inbox" : "My reservations"}</h1>
-        {isOwner && (
-          <p className="mt-1 text-sm text-slate-600">
-            Incoming bookings across all your shops.
-          </p>
-        )}
-      </header>
+      <PageHeader
+        onBack={() => router.back()}
+        backLabel="Back"
+        icon={CalendarCheck2}
+        title={isOwner ? "Inbox" : "My reservations"}
+        description={
+          isOwner
+            ? "Incoming bookings across all your shops."
+            : "Manage your upcoming and past bookings."
+        }
+      />
 
       <nav className="-mx-1 flex flex-wrap gap-1 overflow-x-auto">
         {tabs.map((t) => {
@@ -287,9 +326,15 @@ export default function ReservationsPage() {
           {visible.map((r) => (
             <ReservationCard
               key={r.id}
+              id={`reservation-${r.id}`}
+              className={`scroll-mt-24 transition-shadow ${
+                highlightedId === r.id
+                  ? "ring-2 ring-brand-400 ring-offset-2"
+                  : ""
+              }`}
               reservation={r}
               actions={buildActions(r)}
-              shopLinkPrefix={isOwner ? "/dashboard/shops" : "/shops"}
+              shopLinkPrefix={isOwner ? "/my-shops" : "/shops"}
               badge={r.source === "walk_in" ? "walk-in" : undefined}
             />
           ))}

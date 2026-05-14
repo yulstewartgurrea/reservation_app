@@ -20,7 +20,7 @@ const STATUS_PILL: Record<string, string> = {
 };
 
 /**
- * Photo-forward shop card. Used by /dashboard (owner) and /shops (public).
+ * Photo-forward shop card. Used by /my-shops (owner) and /shops (public).
  *
  * Layout: cover image on top, body underneath with title, location, optional
  * status pill / distance, and an outlined CTA on the right.

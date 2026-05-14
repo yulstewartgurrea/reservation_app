@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useParams } from "next/navigation";
+import { Clock } from "lucide-react";
 import { api } from "@/lib/api";
 import { HoursEditor } from "@/components/HoursEditor";
+import { PageHeader } from "@/components/PageHeader";
 
 type StaffHoursRow = {
   weekday: number;
@@ -14,7 +16,6 @@ type StaffHoursRow = {
 
 export default function StaffHoursPage() {
   const { id, staffId } = useParams<{ id: string; staffId: string }>();
-  const router = useRouter();
   const [name, setName] = useState("");
 
   useEffect(() => {
@@ -22,19 +23,15 @@ export default function StaffHoursPage() {
   }, [staffId]);
 
   return (
-    <div className="mx-auto max-w-2xl py-6">
-      <div className="mb-2 flex items-center justify-between">
-        <span />
-        <button
-          onClick={() => router.push(`/dashboard/shops/${id}/staff`)}
-          className="text-sm text-slate-600 hover:underline"
-        >
-          ← Back to staff
-        </button>
-      </div>
-      <HoursEditor<StaffHoursRow, StaffHoursRow>
+    <div className="mx-auto max-w-3xl py-6">
+      <PageHeader
+        backHref={`/my-shops/${id}/staff`}
+        backLabel="Back to staff"
+        icon={Clock}
         title={`${name || "Staff"} hours`}
-        description="Set the staff member's weekly schedule. Customers can only book this person during their working hours (intersected with shop hours)."
+        description="Set this staff member's weekly schedule. Customers can only book them during their working hours (intersected with shop hours)."
+      />
+      <HoursEditor<StaffHoursRow, StaffHoursRow>
         workingLabel="Working"
         load={async () => (await api.get(`/shops/staff/${staffId}/hours/`)).data ?? []}
         save={async (rows) => {

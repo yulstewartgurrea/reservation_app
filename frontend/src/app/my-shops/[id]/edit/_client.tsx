@@ -4,26 +4,26 @@ import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
 import {
-  ArrowLeft,
-  BarChart3,
   Building2,
-  CalendarClock,
   ChevronDown,
   ChevronUp,
-  Clock,
   Image as ImageIcon,
   ImagePlus,
   MapPin,
+  MoreHorizontal,
+  Pencil,
   Phone,
   Sliders,
+  Star,
   Store,
   Trash2,
-  Users,
+  X,
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatApiError } from "@/lib/errors";
+import { ConfirmationDialog } from "@/components/ConfirmationDialog";
 import { FormField as Field, FormSection as Section } from "@/components/FormSection";
-import { SidebarCard } from "@/components/SidebarCard";
+import { PageHeader } from "@/components/PageHeader";
 import { Toast, ToastMessage } from "@/components/Toast";
 
 type FormValues = {
@@ -95,6 +95,9 @@ export default function EditShopPage() {
   const [saving, setSaving] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [toast, setToast] = useState<ToastMessage | null>(null);
+  const [deletingPhotoId, setDeletingPhotoId] = useState<number | null>(null);
+  const [coverPromotionId, setCoverPromotionId] = useState<number | null>(null);
+  const [menuOpenId, setMenuOpenId] = useState<number | null>(null);
 
   async function loadShop() {
     try {
@@ -150,8 +153,9 @@ export default function EditShopPage() {
     });
   }
 
-  async function deleteExistingPhoto(photoId: number) {
-    if (!shop) return;
+  async function confirmDeletePhoto() {
+    if (!shop || deletingPhotoId == null) return;
+    const photoId = deletingPhotoId;
     try {
       await api.delete(`/shops/${id}/photos/${photoId}/`);
       setShop({
@@ -161,6 +165,25 @@ export default function EditShopPage() {
       setToast({ variant: "success", message: "Photo removed." });
     } catch (err) {
       setToast({ variant: "error", message: formatApiError(err) });
+    } finally {
+      setDeletingPhotoId(null);
+    }
+  }
+
+  async function confirmSetCoverPhoto() {
+    if (!shop || coverPromotionId == null) return;
+    const photoId = coverPromotionId;
+    try {
+      const { data } = await api.post(`/shops/${id}/photos/${photoId}/cover/`);
+      setShop({ ...shop, photos: data });
+      setToast({ variant: "success", message: "Cover photo updated." });
+    } catch (err) {
+      setToast({
+        variant: "error",
+        message: formatApiError(err, "Failed to set cover."),
+      });
+    } finally {
+      setCoverPromotionId(null);
     }
   }
 
@@ -223,36 +246,41 @@ export default function EditShopPage() {
   const hasPin = Boolean(form.address_line && form.city);
   const photoCount = shop.photos.length + staged.length;
 
-  return (
-    <form onSubmit={save} className="space-y-4 py-4">
-      {/* HEADER */}
-      <header className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-3">
-          <Link
-            href={`/dashboard/shops/${id}`}
-            className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-          >
-            <ArrowLeft size={16} />
-            Back
-          </Link>
-          <div>
-            <h1 className="text-xl font-semibold text-slate-900 sm:text-2xl">
-              Edit shop
-            </h1>
-            <p className="text-xs text-slate-500">{shop.name}</p>
-          </div>
-        </div>
-        {dirty && (
-          <span className="inline-flex items-center gap-1.5 self-start rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800">
-            <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
-            Unsaved changes
-          </span>
-        )}
-      </header>
+  const statusPill = (
+    <span
+      className={`inline-flex items-center gap-1.5 self-start rounded-full px-2.5 py-1 text-xs font-medium ${
+        shop.status === "active"
+          ? "bg-emerald-100 text-emerald-700"
+          : shop.status === "paused"
+            ? "bg-amber-100 text-amber-700"
+            : "bg-slate-100 text-slate-700"
+      }`}
+    >
+      <span className="h-1.5 w-1.5 rounded-full bg-current" />
+      {shop.status[0].toUpperCase() + shop.status.slice(1)}
+    </span>
+  );
 
-      <div className="grid gap-4 lg:grid-cols-3">
-        {/* LEFT: sections */}
-        <div className="space-y-4 lg:col-span-2">
+  return (
+    <form onSubmit={save} className="space-y-6 py-6">
+      <PageHeader
+        icon={Pencil}
+        title="Edit shop"
+        description={shop.name}
+        actions={
+          <>
+            {statusPill}
+            {dirty && (
+              <span className="inline-flex items-center gap-1.5 self-start rounded-full bg-amber-50 px-2.5 py-1 text-xs font-medium text-amber-800">
+                <span className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                Unsaved changes
+              </span>
+            )}
+          </>
+        }
+      />
+
+      <div className="space-y-4">
           {/* 1. BASIC INFO */}
           <Section
             index={1}
@@ -294,48 +322,106 @@ export default function EditShopPage() {
             subtitle="Customers see these on your shop page."
           >
             <ul className="grid grid-cols-1 gap-3 sm:grid-cols-2 md:grid-cols-3">
-              {shop.photos.map((p) => (
-                <li
-                  key={`saved-${p.id}`}
-                  className="group relative overflow-hidden rounded-xl border border-slate-200 bg-slate-100"
-                >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={p.image}
-                    alt={p.caption || shop.name}
-                    className="aspect-[4/3] w-full object-cover"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => deleteExistingPhoto(p.id)}
-                    className="absolute right-2 top-2 rounded-full bg-white/95 p-1.5 text-slate-600 opacity-0 shadow transition group-hover:opacity-100 hover:bg-white hover:text-red-700"
-                    aria-label="Delete photo"
+              {shop.photos.map((p, idx) => {
+                const isCover = idx === 0;
+                const menuOpen = menuOpenId === p.id;
+                return (
+                  <li
+                    key={`saved-${p.id}`}
+                    className="relative rounded-xl border border-slate-200 bg-slate-100"
                   >
-                    <Trash2 size={16} />
-                  </button>
-                </li>
-              ))}
+                    <div className="overflow-hidden rounded-xl">
+                      {/* eslint-disable-next-line @next/next/no-img-element */}
+                      <img
+                        src={p.image}
+                        alt={p.caption || shop.name}
+                        className="aspect-[4/3] w-full object-cover"
+                      />
+                    </div>
+                    {isCover && (
+                      <span className="pointer-events-none absolute left-2 top-2 inline-flex items-center gap-1 rounded-full bg-brand-600 px-2 py-0.5 text-xs font-medium text-white shadow">
+                        <Star size={12} fill="currentColor" />
+                        Cover
+                      </span>
+                    )}
+                    <button
+                      type="button"
+                      onClick={() => setMenuOpenId(menuOpen ? null : p.id)}
+                      aria-haspopup="menu"
+                      aria-expanded={menuOpen}
+                      aria-label="Photo actions"
+                      className="absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center rounded-md bg-white text-slate-600 shadow-sm hover:bg-slate-50"
+                    >
+                      <MoreHorizontal size={16} />
+                    </button>
+                    {menuOpen && (
+                      <>
+                        <button
+                          type="button"
+                          aria-label="Close menu"
+                          tabIndex={-1}
+                          onClick={() => setMenuOpenId(null)}
+                          className="fixed inset-0 z-10 cursor-default"
+                        />
+                        <div
+                          role="menu"
+                          className="absolute right-2 top-11 z-20 w-44 overflow-hidden rounded-md border border-slate-200 bg-white py-1 shadow-lg"
+                        >
+                          {!isCover && (
+                            <button
+                              type="button"
+                              role="menuitem"
+                              onClick={() => {
+                                setMenuOpenId(null);
+                                setCoverPromotionId(p.id);
+                              }}
+                              className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-slate-700 hover:bg-slate-50"
+                            >
+                              <Star size={14} className="text-brand-600" />
+                              Set as cover
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            role="menuitem"
+                            onClick={() => {
+                              setMenuOpenId(null);
+                              setDeletingPhotoId(p.id);
+                            }}
+                            className="flex w-full items-center gap-2 px-3 py-2 text-left text-sm text-red-700 hover:bg-red-50"
+                          >
+                            <Trash2 size={14} />
+                            Delete photo
+                          </button>
+                        </div>
+                      </>
+                    )}
+                  </li>
+                );
+              })}
               {staged.map((p) => (
                 <li
                   key={`staged-${p.id}`}
-                  className="group relative overflow-hidden rounded-xl border-2 border-dashed border-brand-300 bg-slate-100"
+                  className="relative rounded-xl border-2 border-dashed border-brand-300 bg-slate-100"
                 >
-                  {/* eslint-disable-next-line @next/next/no-img-element */}
-                  <img
-                    src={p.preview}
-                    alt={p.file.name}
-                    className="aspect-[4/3] w-full object-cover"
-                  />
-                  <span className="absolute left-2 top-2 rounded-full bg-brand-600 px-2 py-0.5 text-xs font-medium text-white shadow">
+                  <div className="overflow-hidden rounded-xl">
+                    {/* eslint-disable-next-line @next/next/no-img-element */}
+                    <img
+                      src={p.preview}
+                      alt={p.file.name}
+                      className="aspect-[4/3] w-full object-cover"
+                    />
+                  </div>
+                  <span className="pointer-events-none absolute left-2 top-2 rounded-full bg-brand-600 px-2 py-0.5 text-xs font-medium text-white shadow">
                     Pending upload
                   </span>
                   <button
                     type="button"
                     onClick={() => unstage(p.id)}
-                    className="absolute right-2 top-2 rounded-full bg-white/95 p-1.5 text-slate-600 opacity-0 shadow transition group-hover:opacity-100 hover:bg-white hover:text-red-700"
+                    className="absolute right-2 top-2 inline-flex h-8 w-8 items-center justify-center rounded-md bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-red-700"
                     aria-label="Remove pending photo"
                   >
-                    <Trash2 size={16} />
+                    <X size={16} />
                   </button>
                 </li>
               ))}
@@ -522,66 +608,12 @@ export default function EditShopPage() {
               </div>
             )}
           </section>
-        </div>
-
-        {/* RIGHT: sidebar with quick links */}
-        <aside className="space-y-4 lg:col-span-1">
-          <SidebarCard tone="slate" title="Manage" body="Jump to other parts of this shop.">
-            <ul className="space-y-1">
-              <QuickLink
-                href={`/dashboard/shops/${id}/hours`}
-                icon={Clock}
-                label="Hours"
-              />
-              <QuickLink
-                href={`/dashboard/shops/${id}/overrides`}
-                icon={CalendarClock}
-                label="Date overrides"
-              />
-              <QuickLink
-                href={`/dashboard/shops/${id}/staff`}
-                icon={Users}
-                label="Staff"
-              />
-              <QuickLink
-                href={`/dashboard/shops/${id}/analytics`}
-                icon={BarChart3}
-                label="Analytics"
-              />
-            </ul>
-          </SidebarCard>
-
-          <SidebarCard
-            tone="slate"
-            title="Shop status"
-            body={
-              shop.status === "active"
-                ? "Your shop is live and accepting bookings."
-                : shop.status === "paused"
-                  ? "Paused — customers can't book until you publish."
-                  : "Pending review."
-            }
-          >
-            <span
-              className={`inline-flex items-center gap-1.5 rounded-full px-2.5 py-0.5 text-xs font-medium ${
-                shop.status === "active"
-                  ? "bg-emerald-100 text-emerald-700"
-                  : shop.status === "paused"
-                    ? "bg-amber-100 text-amber-700"
-                    : "bg-slate-100 text-slate-700"
-              }`}
-            >
-              <span className="h-1.5 w-1.5 rounded-full bg-current" />
-              {shop.status[0].toUpperCase() + shop.status.slice(1)}
-            </span>
-          </SidebarCard>
-        </aside>
       </div>
 
       {/* STICKY SAVE BAR */}
       <div className="sticky bottom-4 flex flex-col-reverse gap-2 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-end">
         <Link
-          href={`/dashboard/shops/${id}`}
+          href={`/my-shops/${id}`}
           className="inline-flex items-center justify-center rounded-lg border border-slate-300 px-4 py-2 text-sm font-medium text-slate-700 hover:bg-slate-50"
         >
           Cancel
@@ -595,6 +627,28 @@ export default function EditShopPage() {
         </button>
       </div>
 
+      {deletingPhotoId != null && (
+        <ConfirmationDialog
+          open
+          title="Delete this photo?"
+          description="The photo will be removed from your shop page. This can't be undone."
+          variant="danger"
+          confirmLabel="Delete photo"
+          onConfirm={confirmDeletePhoto}
+          onCancel={() => setDeletingPhotoId(null)}
+        />
+      )}
+      {coverPromotionId != null && (
+        <ConfirmationDialog
+          open
+          title="Set as cover photo?"
+          description="This photo will be shown as the main image on your shop listing and detail page."
+          variant="primary"
+          confirmLabel="Set as cover"
+          onConfirm={confirmSetCoverPhoto}
+          onCancel={() => setCoverPromotionId(null)}
+        />
+      )}
       <Toast toast={toast} onDismiss={() => setToast(null)} />
     </form>
   );
@@ -678,30 +732,5 @@ function MapPreview({ hasPin }: { hasPin: boolean }) {
           : "Enter an address to drop a pin"}
       </div>
     </div>
-  );
-}
-
-function QuickLink({
-  href,
-  icon: Icon,
-  label,
-}: {
-  href: string;
-  icon: typeof Clock;
-  label: string;
-}) {
-  return (
-    <li>
-      <Link
-        href={href}
-        className="flex items-center justify-between gap-2 rounded-md px-2 py-1.5 text-sm text-slate-700 hover:bg-slate-50"
-      >
-        <span className="inline-flex items-center gap-2">
-          <Icon size={14} className="text-slate-400" />
-          {label}
-        </span>
-        <span className="text-slate-400">→</span>
-      </Link>
-    </li>
   );
 }

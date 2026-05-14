@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import Link from "next/link";
 import { useParams } from "next/navigation";
-import { ArrowLeft } from "lucide-react";
+import { BarChart3 } from "lucide-react";
 import { api } from "@/lib/api";
+import { PageHeader } from "@/components/PageHeader";
 
 type Analytics = {
   window_days: number;
@@ -49,32 +49,27 @@ export default function ShopAnalyticsPage() {
   );
 
   return (
-    <div className="space-y-6 py-4">
-      <div>
-        <Link
-          href={`/dashboard/shops/${id}`}
-          className="inline-flex items-center gap-1.5 rounded-md border border-slate-200 bg-white px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-        >
-          <ArrowLeft size={16} />
-          Back
-        </Link>
-      </div>
-      <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-semibold">Shop analytics</h1>
-        <div className="flex items-center gap-2">
-          <label className="text-sm text-slate-600">Window</label>
-          <select
-            value={days}
-            onChange={(e) => setDays(Number(e.target.value))}
-            className="rounded-md border border-slate-300 px-2 py-1 text-sm"
-          >
-            <option value={7}>Last 7 days</option>
-            <option value={30}>Last 30 days</option>
-            <option value={90}>Last 90 days</option>
-            <option value={365}>Last year</option>
-          </select>
-        </div>
-      </div>
+    <div className="mx-auto max-w-5xl space-y-6 py-6">
+      <PageHeader
+        icon={BarChart3}
+        title="Shop analytics"
+        description="Booking volume, completion, and revenue for the selected window."
+        actions={
+          <div className="flex items-center gap-2">
+            <label className="text-sm text-slate-600">Window</label>
+            <select
+              value={days}
+              onChange={(e) => setDays(Number(e.target.value))}
+              className="rounded-md border border-slate-300 px-2 py-1.5 text-sm"
+            >
+              <option value={7}>Last 7 days</option>
+              <option value={30}>Last 30 days</option>
+              <option value={90}>Last 90 days</option>
+              <option value={365}>Last year</option>
+            </select>
+          </div>
+        }
+      />
 
       {loading || !data ? (
         <p className="text-sm text-slate-500">Loading…</p>
