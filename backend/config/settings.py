@@ -108,8 +108,42 @@ USE_TZ = True
 
 STATIC_URL = "static/"
 STATIC_ROOT = BASE_DIR / "staticfiles"
-MEDIA_URL = "media/"
-MEDIA_ROOT = BASE_DIR / "media"
+
+# Media storage — S3 with presigned URLs, everywhere.
+#
+# The bucket stays fully private (no public ACLs, no public bucket policy);
+# every read goes through a time-limited signed URL generated server-side via
+# either the ECS task's IAM role (in AWS) or the developer's AWS credentials
+# (locally). AWS_STORAGE_BUCKET_NAME is required at startup so we fail loudly
+# instead of silently writing to ephemeral container disk.
+#
+# Tests override this with InMemoryStorage in config/test_settings.py.
+AWS_STORAGE_BUCKET_NAME = env("AWS_STORAGE_BUCKET_NAME")
+STORAGES = {
+    "default": {
+        "BACKEND": "storages.backends.s3.S3Storage",
+        "OPTIONS": {
+            "bucket_name": AWS_STORAGE_BUCKET_NAME,
+            "region_name": env("AWS_S3_REGION_NAME", default=env("AWS_REGION", default="ap-southeast-1")),
+            # ap-southeast-1 only supports SigV4.
+            "signature_version": "s3v4",
+            # Bucket has BucketOwnerEnforced — per-object ACLs are disabled,
+            # so we MUST NOT send one on PutObject.
+            "default_acl": None,
+            # Every URL is a presigned GET valid for 6 hours. Long enough
+            # that an open tab keeps rendering; short enough that a leaked
+            # URL has limited reach.
+            "querystring_auth": True,
+            "querystring_expire": 60 * 60 * 6,
+            # Two users uploading "photo.jpg" get distinct keys instead of
+            # one silently clobbering the other.
+            "file_overwrite": False,
+        },
+    },
+    "staticfiles": {
+        "BACKEND": "django.contrib.staticfiles.storage.StaticFilesStorage",
+    },
+}
 
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
@@ -196,6 +230,17 @@ EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
 EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
 EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="BookMe <noreply@bookme.local>")
+
+LOGGING = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "handlers": {
+        "console": {"class": "logging.StreamHandler"},
+    },
+    "loggers": {
+        "apps": {"handlers": ["console"], "level": "INFO", "propagate": False},
+    },
+}
 
 FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:3000")
 

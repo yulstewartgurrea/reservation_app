@@ -326,10 +326,39 @@ the AWS-managed `AmazonSSMReadOnlyAccess` policy by default — broad but functi
 **Creates** — private + public S3 buckets from `bucket_names_private` / `bucket_names_public` lists.
 Private buckets get full public-access-block. Both use AES-256 SSE.
 
-Today stage has one private bucket: `s3-reservation-stage-media`. Django's `MEDIA_ROOT` should
-point here via `django-storages[s3]` (not wired in app code yet — when you wire it, set
-`AWS_STORAGE_BUCKET_NAME` to the bucket and grant the task IAM role `s3:GetObject` / `s3:PutObject`
-on `arn:aws:s3:::s3-reservation-stage-media/*`).
+Today stage has one private bucket: `s3-reservation-stage-media`. Django is wired to it via
+`django-storages[s3]` — see § "Media uploads (S3 + presigned URLs)" right below.
+
+#### Media uploads (S3 + presigned URLs)
+
+User-uploaded files — `User.avatar`, `Shop.image`, `Staff.photo`, `Service.image`,
+`Message.attachment` — all flow through Django's default storage. The bucket
+stays **fully private**: no public ACL, no public bucket policy, no
+CloudFront-OAC. Every read URL is a **presigned GET** signed server-side by the
+ECS task's IAM role.
+
+S3 is the **only** storage backend — there is no local-filesystem fallback in
+the app code, so misconfiguration fails loudly at startup rather than silently
+writing to disposable container disk. Local dev points at the same bucket
+using a developer's AWS credentials (or a personal dev bucket); tests stub
+storage out with `InMemoryStorage`.
+
+How the wiring works:
+
+| Piece | Where |
+|---|---|
+| Dependency | `django-storages[s3]` in [backend/requirements.txt](../backend/requirements.txt) |
+| Storage backend | `STORAGES["default"]` in [backend/config/settings.py](../backend/config/settings.py) — unconditional `S3Storage`; `AWS_STORAGE_BUCKET_NAME` is required at import time |
+| Test override | `InMemoryStorage` in [backend/config/test_settings.py](../backend/config/test_settings.py) — no AWS calls in CI |
+| Bucket name → env var | `AWS_STORAGE_BUCKET_NAME` SSM parameter in [parameters/env.yaml](accounts/stage/ap-southeast-1/parameters/env.yaml), pulled into the task via `common_secrets` in [region.hcl](accounts/stage/ap-southeast-1/region.hcl) |
+| IAM | `S3MediaObjects` + `S3MediaListBucket` statements in `tasks_iam_role_statements` in [region.hcl](accounts/stage/ap-southeast-1/region.hcl) — scoped to the media bucket only |
+| URL lifetime | 6 hours (`querystring_expire = 60 * 60 * 6` in settings.py) — long enough for an open tab, short enough that a leaked URL has limited reach |
+
+To rotate the URL expiry, change `querystring_expire` and redeploy — no infra
+change required. To swap to CloudFront-fronted media later (cheaper egress,
+shareable per-session signed cookies), keep the bucket private and add a
+distribution with an OAC in front of it; the Django side doesn't need to
+change because `S3Storage` can be subclassed to swap the URL host.
 
 ### `ses`
 
@@ -837,26 +866,11 @@ For reproducible deploys + easy rollback:
 2. Move the container `image` field in [region.hcl](accounts/stage/ap-southeast-1/region.hcl) to a variable, e.g. `var.api_image_tag`.
 3. CI sets `TF_VAR_api_image_tag=<sha>` and runs `terragrunt apply` on the `ecs` layer.
 
-### Adding django-storages with S3 for media
+### Media uploads with S3
 
-1. Add `django-storages[s3]` to `backend/requirements.txt`.
-2. In `backend/config/settings.py`, set `DEFAULT_FILE_STORAGE = "storages.backends.s3boto3.S3Boto3Storage"` and `AWS_STORAGE_BUCKET_NAME = env("AWS_STORAGE_BUCKET_NAME")`.
-3. Add to [parameters/env.yaml](accounts/stage/ap-southeast-1/parameters/env.yaml):
-   ```yaml
-   ssm_parameters:
-     AWS_STORAGE_BUCKET_NAME: "s3-reservation-stage-media"
-   ```
-4. Add `AWS_STORAGE_BUCKET_NAME` to `common_secrets` in region.hcl.
-5. Add S3 permissions to `tasks_iam_role_statements` in region.hcl:
-   ```hcl
-   {
-     actions   = ["s3:GetObject", "s3:PutObject", "s3:DeleteObject"]
-     resources = ["arn:aws:s3:::s3-reservation-stage-media/*"]
-     effect    = "Allow"
-     sid       = "S3Media"
-   }
-   ```
-6. Apply ecs + parameters layers.
+Already wired — see the [`storage` layer reference](#storage) above for how
+Django, the SSM parameter and the task IAM policy fit together. The bucket
+stays private; URLs are presigned with a 6-hour expiry.
 
 ---
 

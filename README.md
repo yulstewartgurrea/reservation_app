@@ -154,6 +154,9 @@ All in `backend/.env` (mirrors `backend/.env.example`).
 | `PAYMONGO_SECRET_KEY` | "" | PayMongo secret (sk_test_… or sk_live_…). Empty enables dev-fake mode. |
 | `PAYMONGO_PUBLIC_KEY` | "" | PayMongo publishable key |
 | `PAYMONGO_WEBHOOK_SECRET` | "" | HMAC secret PayMongo uses to sign webhooks |
+| `AWS_STORAGE_BUCKET_NAME` | **required** | S3 bucket for media (avatars, shop/service photos, chat attachments). The app refuses to start without it — there is no local-filesystem fallback. For local dev, point at the staging bucket. |
+| `AWS_S3_REGION_NAME` | falls back to `AWS_REGION`, then `ap-southeast-1` | Override only when the bucket lives in a different region than the task. |
+| `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` / `AWS_REGION` | — | Only needed for **local dev** — these flow into boto3 so docker can sign presigned URLs + put objects. In AWS, credentials come from the ECS task role; leave these unset there. |
 
 ---
 
@@ -868,6 +871,9 @@ AWS_PROFILE=reservation-stage terragrunt import \
   <sgr-XXXXXXXX>   # the security-group-rule ID from `aws ec2 describe-security-group-rules`
 ```
 Single-quote the address (zsh expands `[...]`). Re-apply afterward — expect "0 changes".
+
+**Empty commit (`git commit --allow-empty`) doesn't trigger the frontend-deploy workflow**
+Both [.github/workflows/frontend-deploy.yml](.github/workflows/frontend-deploy.yml) and [.github/workflows/backend-deploy.yml](.github/workflows/backend-deploy.yml) are path-filtered (`paths: ["frontend/**" ...]`). An empty commit changes no files, so the workflow filter never matches and GitHub skips the run. To force a frontend rebuild without touching code, either (a) re-run the last frontend-deploy from the **Actions** tab (the workflow re-reads `vars.NEXT_PUBLIC_API_URL` at runtime, so config-only changes get picked up), or (b) touch any file under `frontend/` (a comment edit is enough) and push. Same applies to backend-deploy with `aws/**` and `backend/**`.
 
 **Requests hit `/api/api/<path>` (doubled prefix) and 404 / 504**
 The frontend axios client in [frontend/src/lib/api.ts](frontend/src/lib/api.ts) sets `baseURL = ${NEXT_PUBLIC_API_URL}/api` — it appends `/api` itself. If you also include `/api` in the env var (e.g. `NEXT_PUBLIC_API_URL=https://....cloudfront.net/api`), you end up with `/api/api/...`. Fix: `NEXT_PUBLIC_API_URL` must be the **origin only** (no path), e.g. `https://dx1epgde94eqq.cloudfront.net`. Update **Settings → Environments → staging → Variables** and re-run the frontend-deploy workflow — Next.js bakes `NEXT_PUBLIC_*` at build time, so changing the var alone does nothing.

@@ -54,6 +54,11 @@ locals {
   api_image_tag   = get_env("API_IMAGE_TAG", "latest")
   container_image = "${local.account_id}.dkr.ecr.${local.aws_region}.amazonaws.com/${local.base_image_name}:${local.api_image_tag}"
 
+  # S3 bucket holding user uploads (avatars, shop/service photos, chat
+  # attachments). Defined here so both the task IAM policy and the SSM
+  # parameter reference the same name.
+  media_bucket_name = "s3-${local.project_name}-${local.env}-media"
+
   # Common ECS task IAM policies — read app secrets/params from /reservation/* in this account.
   tasks_iam_role_statements = [
     {
@@ -67,6 +72,21 @@ locals {
       resources = ["*"]
       effect    = "Allow"
       sid       = "KMSDecryptSecureStrings"
+    },
+    # Django uses these to upload, fetch, presign and delete user media.
+    # ListBucket is required by django-storages' file_overwrite=False check
+    # (it lists to confirm whether a key already exists before saving).
+    {
+      actions = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
+      resources = ["arn:aws:s3:::${local.media_bucket_name}/*"]
+      effect    = "Allow"
+      sid       = "S3MediaObjects"
+    },
+    {
+      actions   = ["s3:ListBucket"]
+      resources = ["arn:aws:s3:::${local.media_bucket_name}"]
+      effect    = "Allow"
+      sid       = "S3MediaListBucket"
     }
   ]
 
@@ -118,6 +138,9 @@ locals {
     { name = "PAYMONGO_SECRET_KEY", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/PAYMONGO_SECRET_KEY" },
     { name = "PAYMONGO_PUBLIC_KEY", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/PAYMONGO_PUBLIC_KEY" },
     { name = "PAYMONGO_WEBHOOK_SECRET", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/PAYMONGO_WEBHOOK_SECRET" },
+
+    # Media — when set, Django uses S3Storage + presigned URLs.
+    { name = "AWS_STORAGE_BUCKET_NAME", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/AWS_STORAGE_BUCKET_NAME" },
   ]
 
   runtime_platform_x86 = {
@@ -279,10 +302,12 @@ locals {
   }
 
   # ---------------------------------------------------------------------------
-  # S3 (media uploads — shop photos etc.)
+  # S3 (media uploads — avatars, shop photos, service images, chat attachments)
   # ---------------------------------------------------------------------------
+  # Stays private — the backend signs every read URL (6-hour expiry) so no
+  # public ACL / bucket policy is needed. See settings.py STORAGES["default"].
   bucket_names_private = [
-    "s3-${local.project_name}-${local.env}-media",
+    local.media_bucket_name,
   ]
   bucket_names_public = []
 
