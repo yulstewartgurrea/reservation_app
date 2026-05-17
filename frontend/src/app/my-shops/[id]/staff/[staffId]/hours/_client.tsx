@@ -1,11 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
 import { Clock } from "lucide-react";
 import { api } from "@/lib/api";
 import { HoursEditor } from "@/components/HoursEditor";
 import { PageHeader } from "@/components/PageHeader";
+import { useUrlParams } from "@/lib/useUrlParams";
 
 type StaffHoursRow = {
   weekday: number;
@@ -15,12 +15,17 @@ type StaffHoursRow = {
 };
 
 export default function StaffHoursPage() {
-  const { id, staffId } = useParams<{ id: string; staffId: string }>();
+  const { id, staffId } = useUrlParams<{ id: string; staffId: string }>(
+    "/my-shops/[id]/staff/[staffId]/hours"
+  );
   const [name, setName] = useState("");
 
   useEffect(() => {
+    if (!staffId) return;
     api.get(`/shops/staff/${staffId}/`).then((r) => setName(r.data.name));
   }, [staffId]);
+
+  if (!id || !staffId) return null;
 
   return (
     <div className="mx-auto max-w-3xl py-6">

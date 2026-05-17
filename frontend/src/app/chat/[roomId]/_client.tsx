@@ -1,7 +1,8 @@
 "use client";
 
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
+import { useUrlParams } from "@/lib/useUrlParams";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowLeft, MoreVertical, Paperclip, Send, Smile, X } from "lucide-react";
 import { api } from "@/lib/api";
@@ -68,9 +69,9 @@ function sameDay(a: string, b: string): boolean {
 }
 
 export default function ChatRoomPage() {
-  const params = useParams<{ roomId: string }>();
+  const params = useUrlParams<{ roomId: string }>("/chat/[roomId]");
   const router = useRouter();
-  const roomId = Number(params.roomId);
+  const roomId = params.roomId ? Number(params.roomId) : 0;
   const { user, fetchMe } = useAuth();
 
   const [room, setRoom] = useState<Room | null>(null);
@@ -107,6 +108,7 @@ export default function ChatRoomPage() {
 
   const markReadUpTo = useCallback(
     async (msgId: number) => {
+      if (!roomId) return;
       try {
         await api.post(`/chat/rooms/${roomId}/read/`, { message_id: msgId });
       } catch {
@@ -117,6 +119,7 @@ export default function ChatRoomPage() {
   );
 
   const load = useCallback(async () => {
+    if (!roomId) return;
     setLoading(true);
     try {
       const [roomRes, msgsRes] = await Promise.all([

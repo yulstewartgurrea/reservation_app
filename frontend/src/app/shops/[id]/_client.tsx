@@ -2,7 +2,8 @@
 
 import { useEffect, useState } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
+import { useUrlParams } from "@/lib/useUrlParams";
 import {
   ArrowLeft,
   CalendarDays,
@@ -54,7 +55,7 @@ type Review = {
 };
 
 export default function ShopDetailPage() {
-  const params = useParams<{ id: string }>();
+  const params = useUrlParams<{ id: string }>("/shops/[id]");
   const router = useRouter();
   const { user } = useAuth();
   const [shop, setShop] = useState<Shop | null>(null);
@@ -79,6 +80,7 @@ export default function ShopDetailPage() {
   }
 
   useEffect(() => {
+    if (!params.id) return;
     api.get(`/shops/${params.id}/`).then((r) => setShop(r.data));
     api
       .get(`/reviews/`, { params: { shop: params.id } })

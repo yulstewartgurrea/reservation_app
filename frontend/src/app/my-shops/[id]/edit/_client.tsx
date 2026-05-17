@@ -2,7 +2,8 @@
 
 import { ChangeEvent, FormEvent, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
+import { useUrlParams } from "@/lib/useUrlParams";
 import {
   Building,
   Building2,
@@ -95,7 +96,7 @@ function toFormValues(d: Partial<Shop>): FormValues {
 }
 
 export default function EditShopPage() {
-  const { id } = useParams<{ id: string }>();
+  const { id } = useUrlParams<{ id: string }>("/my-shops/[id]/edit");
   const router = useRouter();
 
   const [shop, setShop] = useState<Shop | null>(null);
@@ -111,6 +112,7 @@ export default function EditShopPage() {
   const [menuOpenId, setMenuOpenId] = useState<number | null>(null);
 
   async function loadShop() {
+    if (!id) return;
     try {
       const { data } = await api.get(`/shops/${id}/`);
       setShop(data);
@@ -123,6 +125,7 @@ export default function EditShopPage() {
   }
 
   useEffect(() => {
+    if (!id) return;
     loadShop();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);

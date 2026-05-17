@@ -92,26 +92,43 @@ locals {
 resource "aws_cloudfront_function" "rewrite_html" {
   name    = "rewrite-html-${var.project_name}-${var.env}"
   runtime = "cloudfront-js-2.0"
-  comment = "Rewrite extensionless URIs to .html for static Next.js export"
+  comment = "Rewrite extensionless URIs to .html (and dynamic IDs to '_') for static Next.js export"
   publish = true
-  code    = <<-EOT
+  # Tests for this function: aws/layers/frontend_hosting/test_rewrite_html.mjs
+  # Run `node aws/layers/frontend_hosting/test_rewrite_html.mjs` after edits.
+  code = <<-EOT
     function handler(event) {
       var req = event.request;
       var uri = req.uri;
 
-      // Don't rewrite API or WebSocket paths (those go to the ALB origin).
+      // /api/ and /ws/ go to the ALB origin — leave untouched.
       if (uri.startsWith('/api/') || uri.startsWith('/ws/')) {
         return req;
       }
 
-      // Already has a file extension (.html/.js/.css/.png/...) — pass through.
+      // Already a real file (has extension like .html/.js/.css/.png/...) — pass through.
       if (/\.[a-zA-Z0-9]+$/.test(uri)) {
         return req;
       }
 
-      // Trim trailing slash, then map "" -> "/index.html" and "/<page>" -> "/<page>.html".
+      // Normalize trailing slash, then handle the root.
       var trimmed = uri.endsWith('/') ? uri.slice(0, -1) : uri;
-      req.uri = trimmed === '' ? '/index.html' : trimmed + '.html';
+      if (trimmed === '') {
+        req.uri = '/index.html';
+        return req;
+      }
+
+      // Replace every all-numeric path segment with "_" — Next.js's static
+      // export emits dynamic routes under that placeholder via
+      // generateStaticParams() => [{ id: '_' }]. e.g.
+      //   /my-shops/123             -> /my-shops/_.html
+      //   /my-shops/1/services      -> /my-shops/_/services.html
+      //   /my-shops/1/staff/2/hours -> /my-shops/_/staff/_/hours.html
+      //   /my-shops/new             -> /my-shops/new.html  (not numeric, stays static)
+      // Trade-off: assumes dynamic segments are numeric DB IDs. If slug/UUID
+      // routes are added later, broaden this regex.
+      var normalized = trimmed.replace(/\/[0-9]+(?=\/|$)/g, '/_');
+      req.uri = normalized + '.html';
       return req;
     }
   EOT

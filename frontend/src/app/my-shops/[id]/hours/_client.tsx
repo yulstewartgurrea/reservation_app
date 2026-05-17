@@ -1,10 +1,10 @@
 "use client";
 
-import { useParams } from "next/navigation";
 import { Clock } from "lucide-react";
 import { api } from "@/lib/api";
 import { HoursEditor } from "@/components/HoursEditor";
 import { PageHeader } from "@/components/PageHeader";
+import { useUrlParams } from "@/lib/useUrlParams";
 
 type ShopHoursRow = {
   weekday: number;
@@ -14,7 +14,8 @@ type ShopHoursRow = {
 };
 
 export default function ShopHoursPage() {
-  const { id } = useParams<{ id: string }>();
+  const { id } = useUrlParams<{ id: string }>("/my-shops/[id]/hours");
+  if (!id) return null;
 
   return (
     <div className="mx-auto max-w-3xl py-6">

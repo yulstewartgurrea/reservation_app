@@ -21,9 +21,9 @@
  */
 
 import { useCallback, useEffect, useState } from "react";
-import { useParams } from "next/navigation";
 import { api } from "@/lib/api";
 import { formatApiError } from "@/lib/errors";
+import { useUrlParams } from "@/lib/useUrlParams";
 import { Toast, ToastMessage } from "@/components/Toast";
 import { Sidebar } from "./_components/Sidebar";
 
@@ -35,12 +35,13 @@ type ShopSummary = {
 };
 
 export default function ShopDashboardLayout({ children }: { children: React.ReactNode }) {
-  const { id } = useParams<{ id: string }>();
+  const { id } = useUrlParams<{ id: string }>("/my-shops/[id]");
   const [shop, setShop] = useState<ShopSummary | null>(null);
   const [pendingCount, setPendingCount] = useState(0);
   const [toast, setToast] = useState<ToastMessage | null>(null);
 
   const fetchPendingCount = useCallback(async () => {
+    if (!id) return;
     try {
       // Pull just enough rows to count pending ones — the dashboard typically
       // has few open bookings, so we can afford to count client-side. Promote
@@ -57,6 +58,7 @@ export default function ShopDashboardLayout({ children }: { children: React.Reac
   }, [id]);
 
   useEffect(() => {
+    if (!id) return;
     api
       .get(`/shops/${id}/`)
       .then((r) => setShop(r.data))

@@ -16,7 +16,7 @@
  */
 
 import { ChangeEvent, useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useUrlParams } from "@/lib/useUrlParams";
 import { Image as ImageIcon, ImagePlus, Star, Trash2 } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatApiError } from "@/lib/errors";
@@ -32,13 +32,14 @@ type Photo = {
 };
 
 export default function ShopPhotosPage() {
-  const { id } = useParams<{ id: string }>();
+  const { id } = useUrlParams<{ id: string }>("/my-shops/[id]/photos");
   const [photos, setPhotos] = useState<Photo[]>([]);
   const [uploading, setUploading] = useState(false);
   const [toast, setToast] = useState<ToastMessage | null>(null);
   const [deletingId, setDeletingId] = useState<number | null>(null);
 
   async function load() {
+    if (!id) return;
     try {
       const { data } = await api.get(`/shops/${id}/photos/`);
       setPhotos(data);
@@ -51,6 +52,7 @@ export default function ShopPhotosPage() {
   }
 
   useEffect(() => {
+    if (!id) return;
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);

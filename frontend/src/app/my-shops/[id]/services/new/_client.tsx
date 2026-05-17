@@ -21,7 +21,8 @@ import {
   useState,
 } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
+import { useUrlParams } from "@/lib/useUrlParams";
 import {
   ChevronDown,
   ChevronUp,
@@ -72,7 +73,7 @@ function emptyForm(): FormValues {
 
 export default function NewServicePage() {
   const router = useRouter();
-  const { id } = useParams<{ id: string }>();
+  const { id } = useUrlParams<{ id: string }>("/my-shops/[id]/services/new");
 
   const [shop, setShop] = useState<Shop | null>(null);
   const [categories, setCategories] = useState<Category[]>([]);
@@ -83,6 +84,7 @@ export default function NewServicePage() {
   const [bookingOpen, setBookingOpen] = useState(false);
 
   useEffect(() => {
+    if (!id) return;
     async function load() {
       try {
         const [shopRes, catRes] = await Promise.all([

@@ -1,7 +1,8 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
+import { useUrlParams } from "@/lib/useUrlParams";
 import { CalendarDays, Info, User, UserPlus } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatApiError } from "@/lib/errors";
@@ -39,7 +40,7 @@ function toE164(phone: string): string {
 }
 
 export default function WalkInPage() {
-  const { id } = useParams<{ id: string }>();
+  const { id } = useUrlParams<{ id: string }>("/my-shops/[id]/walk-in");
   const router = useRouter();
   const [services, setServices] = useState<Service[]>([]);
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
@@ -47,6 +48,7 @@ export default function WalkInPage() {
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
+    if (!id) return;
     api
       .get(`/services/`, { params: { shop: id } })
       .then((r) => setServices(r.data.results ?? r.data))

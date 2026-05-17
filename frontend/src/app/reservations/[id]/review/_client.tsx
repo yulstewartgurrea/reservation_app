@@ -1,12 +1,13 @@
 "use client";
 
 import { FormEvent, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { formatApiError } from "@/lib/errors";
+import { useUrlParams } from "@/lib/useUrlParams";
 
 export default function LeaveReviewPage() {
-  const { id } = useParams<{ id: string }>();
+  const { id } = useUrlParams<{ id: string }>("/reservations/[id]/review");
   const router = useRouter();
   const [rating, setRating] = useState(5);
   const [comment, setComment] = useState("");
@@ -15,6 +16,7 @@ export default function LeaveReviewPage() {
 
   async function submit(e: FormEvent) {
     e.preventDefault();
+    if (!id) return;
     setSaving(true);
     setError(null);
     try {

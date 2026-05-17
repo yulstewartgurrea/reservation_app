@@ -2,7 +2,8 @@
 
 import { Suspense, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useParams, useRouter, useSearchParams } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { useUrlParams } from "@/lib/useUrlParams";
 import {
   Calendar as CalendarIcon,
   ChevronDown,
@@ -42,7 +43,7 @@ const SUMMARY_DATE_OPTS: Intl.DateTimeFormatOptions = {
 };
 
 function BookPageInner() {
-  const params = useParams<{ id: string }>();
+  const params = useUrlParams<{ id: string }>("/shops/[id]/book");
   const search = useSearchParams();
   const router = useRouter();
   const serviceId = search.get("service");
@@ -63,6 +64,7 @@ function BookPageInner() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!params.id) return;
     api
       .get("/shops/staff/", { params: { shop: params.id } })
       .then((r) => {
@@ -78,7 +80,7 @@ function BookPageInner() {
   }, [serviceId]);
 
   useEffect(() => {
-    if (!serviceId) return;
+    if (!params.id || !serviceId) return;
     setLoadingSlots(true);
     api
       .get("/reservations/availability/", {

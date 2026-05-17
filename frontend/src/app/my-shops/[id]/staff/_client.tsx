@@ -17,7 +17,7 @@
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
 import Link from "next/link";
-import { useParams } from "next/navigation";
+import { useUrlParams } from "@/lib/useUrlParams";
 import {
   CheckCircle2,
   Clock,
@@ -58,7 +58,7 @@ type FormState = {
 const EMPTY_FORM: FormState = { name: "", role: "", contact: "" };
 
 export default function StaffPage() {
-  const { id } = useParams<{ id: string }>();
+  const { id } = useUrlParams<{ id: string }>("/my-shops/[id]/staff");
   const [staff, setStaff] = useState<Staff[]>([]);
   const [stats, setStats] = useState<Stats | null>(null);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
@@ -70,6 +70,7 @@ export default function StaffPage() {
   const [toast, setToast] = useState<ToastMessage | null>(null);
 
   async function loadStaff() {
+    if (!id) return;
     try {
       const { data } = await api.get(`/shops/staff/`, { params: { shop: id } });
       setStaff(data.results ?? data);
@@ -82,6 +83,7 @@ export default function StaffPage() {
   }
 
   async function loadStats() {
+    if (!id) return;
     try {
       const { data } = await api.get<Stats>(`/shops/staff/stats/`, {
         params: { shop: id },
@@ -93,6 +95,7 @@ export default function StaffPage() {
   }
 
   useEffect(() => {
+    if (!id) return;
     loadStaff();
     loadStats();
     // eslint-disable-next-line react-hooks/exhaustive-deps

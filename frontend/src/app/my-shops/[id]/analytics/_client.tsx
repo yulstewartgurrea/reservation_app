@@ -1,10 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams } from "next/navigation";
 import { BarChart3 } from "lucide-react";
 import { api } from "@/lib/api";
 import { PageHeader } from "@/components/PageHeader";
+import { useUrlParams } from "@/lib/useUrlParams";
 
 type Analytics = {
   window_days: number;
@@ -21,12 +21,13 @@ type Analytics = {
 };
 
 export default function ShopAnalyticsPage() {
-  const { id } = useParams<{ id: string }>();
+  const { id } = useUrlParams<{ id: string }>("/my-shops/[id]/analytics");
   const [days, setDays] = useState(30);
   const [data, setData] = useState<Analytics | null>(null);
   const [loading, setLoading] = useState(true);
 
   async function load() {
+    if (!id) return;
     setLoading(true);
     try {
       const { data } = await api.get(`/shops/${id}/analytics/`, { params: { days } });
@@ -37,6 +38,7 @@ export default function ShopAnalyticsPage() {
   }
 
   useEffect(() => {
+    if (!id) return;
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id, days]);

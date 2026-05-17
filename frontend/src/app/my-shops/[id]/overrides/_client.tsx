@@ -17,7 +17,7 @@
  */
 
 import { FormEvent, useEffect, useMemo, useState } from "react";
-import { useParams } from "next/navigation";
+import { useUrlParams } from "@/lib/useUrlParams";
 import {
   CalendarClock,
   Clock,
@@ -63,7 +63,7 @@ const EMPTY_FORM: FormState = {
 };
 
 export default function OverridesPage() {
-  const { id } = useParams<{ id: string }>();
+  const { id } = useUrlParams<{ id: string }>("/my-shops/[id]/overrides");
   const [items, setItems] = useState<Override[]>([]);
   const [form, setForm] = useState<FormState>(EMPTY_FORM);
   /** When set, the form is editing this override (lock date, swap labels). */
@@ -75,6 +75,7 @@ export default function OverridesPage() {
   const [toast, setToast] = useState<ToastMessage | null>(null);
 
   async function load() {
+    if (!id) return;
     try {
       const { data } = await api.get(`/shops/${id}/overrides/`);
       setItems(data);
@@ -87,6 +88,7 @@ export default function OverridesPage() {
   }
 
   useEffect(() => {
+    if (!id) return;
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [id]);

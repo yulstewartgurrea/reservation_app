@@ -24,7 +24,8 @@ import {
   useState,
 } from "react";
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
+import { useUrlParams } from "@/lib/useUrlParams";
 import {
   ChevronDown,
   ChevronUp,
@@ -85,7 +86,9 @@ const MAX_PHOTOS = 8;
 
 export default function EditServicePage() {
   const router = useRouter();
-  const { id, serviceId } = useParams<{ id: string; serviceId: string }>();
+  const { id, serviceId } = useUrlParams<{ id: string; serviceId: string }>(
+    "/my-shops/[id]/services/[serviceId]/edit"
+  );
 
   const [service, setService] = useState<Service | null>(null);
   const [shop, setShop] = useState<Shop | null>(null);
@@ -99,6 +102,7 @@ export default function EditServicePage() {
   const [confirmingDelete, setConfirmingDelete] = useState(false);
 
   async function loadAll() {
+    if (!serviceId || !id) return;
     try {
       const [svcRes, shopRes, catRes] = await Promise.all([
         api.get(`/services/${serviceId}/`),
@@ -126,6 +130,7 @@ export default function EditServicePage() {
   }
 
   useEffect(() => {
+    if (!serviceId) return;
     loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [serviceId]);

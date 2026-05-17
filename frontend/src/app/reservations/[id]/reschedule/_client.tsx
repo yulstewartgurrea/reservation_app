@@ -1,10 +1,11 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
 import { api } from "@/lib/api";
 import { SlotPicker } from "@/components/SlotPicker";
 import { formatApiError } from "@/lib/errors";
+import { useUrlParams } from "@/lib/useUrlParams";
 
 type Reservation = {
   id: number;
@@ -17,7 +18,7 @@ type Reservation = {
 };
 
 export default function ReschedulePage() {
-  const { id } = useParams<{ id: string }>();
+  const { id } = useUrlParams<{ id: string }>("/reservations/[id]/reschedule");
   const router = useRouter();
   const [reservation, setReservation] = useState<Reservation | null>(null);
   const [chosen, setChosen] = useState<string | null>(null);
@@ -25,6 +26,7 @@ export default function ReschedulePage() {
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    if (!id) return;
     api.get(`/reservations/${id}/`).then((r) => setReservation(r.data));
   }, [id]);
 

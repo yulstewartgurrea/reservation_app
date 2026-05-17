@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useParams, useRouter } from "next/navigation";
+import { usePathname, useRouter } from "next/navigation";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { MessageSquare, Search, ArrowLeft } from "lucide-react";
 import { api } from "@/lib/api";
@@ -56,8 +56,16 @@ function formatPreviewTime(iso: string | null): string {
 
 export function ChatSidebar() {
   const router = useRouter();
-  const params = useParams<{ roomId?: string }>();
-  const activeId = params?.roomId ? Number(params.roomId) : null;
+  // usePathname() updates on every navigation; we read the URL directly to
+  // avoid the `useParams() returns "_" on static export` trap (see
+  // src/lib/useUrlParams.ts for why). The regex needs digits so the
+  // placeholder URL `/chat/_` doesn't match while the page is being served
+  // as the SPA fallback.
+  const pathname = usePathname();
+  const activeId = (() => {
+    const m = pathname?.match(/^\/chat\/(\d+)/);
+    return m ? Number(m[1]) : null;
+  })();
   const { user } = useAuth();
 
   const [rooms, setRooms] = useState<ChatRoom[]>([]);

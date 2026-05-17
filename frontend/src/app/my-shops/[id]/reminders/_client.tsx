@@ -1,7 +1,7 @@
 "use client";
 
 import { FormEvent, useEffect, useState } from "react";
-import { useParams } from "next/navigation";
+import { useUrlParams } from "@/lib/useUrlParams";
 import { BellRing, Power, Trash2 } from "lucide-react";
 import { PageHeader } from "@/components/PageHeader";
 import { api } from "@/lib/api";
@@ -37,8 +37,8 @@ function defaultDueLocal(months: number): string {
 }
 
 export default function RemindersPage() {
-  const { id } = useParams<{ id: string }>();
-  const shopId = Number(id);
+  const { id } = useUrlParams<{ id: string }>("/my-shops/[id]/reminders");
+  const shopId = id ? Number(id) : 0;
 
   const [reminders, setReminders] = useState<Reminder[]>([]);
   const [services, setServices] = useState<Service[]>([]);
@@ -57,6 +57,7 @@ export default function RemindersPage() {
   const [submitting, setSubmitting] = useState(false);
 
   async function load() {
+    if (!shopId) return;
     setLoading(true);
     try {
       const [remRes, svcRes] = await Promise.all([
@@ -73,6 +74,7 @@ export default function RemindersPage() {
   }
 
   useEffect(() => {
+    if (!shopId) return;
     load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [shopId]);

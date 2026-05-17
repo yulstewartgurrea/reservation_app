@@ -10,13 +10,15 @@
  */
 
 import { useEffect } from "react";
-import { useParams, useRouter } from "next/navigation";
+import { useRouter } from "next/navigation";
+import { useUrlParams } from "@/lib/useUrlParams";
 
 export default function ShopDashboardRedirect() {
-  const { id } = useParams<{ id: string }>();
+  const { id } = useUrlParams<{ id: string }>("/my-shops/[id]");
   const router = useRouter();
 
   useEffect(() => {
+    if (!id) return;
     router.replace(`/my-shops/${id}/services`);
   }, [id, router]);
 
