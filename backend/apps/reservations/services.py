@@ -8,7 +8,7 @@ from django.db import transaction
 from django.utils import timezone
 from rest_framework.exceptions import ValidationError
 
-from .availability import _has_conflict
+from .availability import _has_conflict, assign_least_loaded_staff, eligible_staff
 from .models import CommissionLedger, Reservation, ReservationStatusHistory
 
 
@@ -59,7 +59,17 @@ def create_customer_reservation(
     _ensure_not_in_past(start_at)
     end_at = start_at + timedelta(minutes=service.duration_minutes)
     block_end = end_at + timedelta(minutes=service.buffer_minutes)
-    _ensure_no_conflict(shop, staff, start_at, block_end)
+
+    if staff is None and eligible_staff(shop, service):
+        # "Any available": auto-assign the least-loaded free staff so the
+        # reservation is tied to a real person and keeps that staff's future
+        # availability correct. Re-checked here (not the stale slot list).
+        staff = assign_least_loaded_staff(shop, service, start_at)
+        if staff is None:
+            raise ValidationError("Selected time slot is no longer available.")
+    else:
+        # Specific staff, or a staff-less shop (legacy shop-level check).
+        _ensure_no_conflict(shop, staff, start_at, block_end)
 
     reservation = Reservation.objects.create(
         customer=customer,

@@ -24,6 +24,32 @@ import { todayIso } from "@/lib/format";
 
 type Staff = { id: number; name: string; is_active: boolean };
 type Slot = { start_at: string; end_at: string };
+type WorkingHours = {
+  weekday: number;
+  is_off: boolean;
+  start_time: string | null;
+  end_time: string | null;
+};
+
+const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+function summarizeHours(rows: WorkingHours[]): string {
+  const working = rows
+    .filter((r) => !r.is_off && r.start_time && r.end_time)
+    .sort((a, b) => a.weekday - b.weekday);
+  if (working.length === 0) return "No working hours set — not bookable.";
+  const hm = (t: string) => t.slice(0, 5);
+  const sameRange = working.every(
+    (r) => r.start_time === working[0].start_time && r.end_time === working[0].end_time
+  );
+  const days = working.map((r) => DAY_NAMES[r.weekday]).join(", ");
+  if (sameRange) {
+    return `Works ${days} · ${hm(working[0].start_time!)}–${hm(working[0].end_time!)}`;
+  }
+  return working
+    .map((r) => `${DAY_NAMES[r.weekday]} ${hm(r.start_time!)}–${hm(r.end_time!)}`)
+    .join(" · ");
+}
 type Service = {
   id: number;
   shop: number;
@@ -62,6 +88,8 @@ function BookPageInner() {
   const [loadingSlots, setLoadingSlots] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [staffHours, setStaffHours] = useState<WorkingHours[] | null>(null);
+  const [refreshKey, setRefreshKey] = useState(0);
 
   useEffect(() => {
     if (!params.id) return;
@@ -93,7 +121,18 @@ function BookPageInner() {
       })
       .then((r) => setSlots(r.data))
       .finally(() => setLoadingSlots(false));
-  }, [params.id, serviceId, date, staffId]);
+  }, [params.id, serviceId, date, staffId, refreshKey]);
+
+  useEffect(() => {
+    if (!staffId) {
+      setStaffHours(null);
+      return;
+    }
+    api
+      .get(`/shops/staff/${staffId}/hours/`)
+      .then((r) => setStaffHours(r.data))
+      .catch(() => setStaffHours(null));
+  }, [staffId]);
 
   const timezone = useMemo(
     () => Intl.DateTimeFormat().resolvedOptions().timeZone,
@@ -125,6 +164,10 @@ function BookPageInner() {
       router.push("/reservations");
     } catch (err) {
       setError(formatApiError(err));
+      // The slot may have just been taken (esp. with "Any available", where
+      // the server auto-assigns). Drop the selection and refetch availability.
+      setChosen(null);
+      setRefreshKey((k) => k + 1);
     } finally {
       setSubmitting(false);
     }
@@ -210,10 +253,23 @@ function BookPageInner() {
             <div className="flex items-center justify-between">
               <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-900">
                 <Clock size={16} className="text-brand-600" />
-                Available times
+                {staffId === ""
+                  ? "Available times"
+                  : `${chosenStaffLabel}'s available times`}
               </h2>
               <span className="text-xs text-slate-500">Timezone: {timezone}</span>
             </div>
+            {staffId === "" ? (
+              <p className="mt-1 text-xs text-slate-500">
+                Across all staff — we&apos;ll assign an available team member.
+              </p>
+            ) : (
+              staffHours && (
+                <p className="mt-1 text-xs text-slate-500">
+                  {summarizeHours(staffHours)}
+                </p>
+              )
+            )}
             <div className="mt-3">
               {loadingSlots ? (
                 <p className="text-sm text-slate-500">Loading slots…</p>

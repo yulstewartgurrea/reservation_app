@@ -32,8 +32,9 @@ class ShopOwnerAccountTests(TestCase):
             "/api/auth/register/",
             {
                 "email": "owner@example.com",
-                "username": "owner",
-                "password": "strong-pw-9",
+                "confirm_email": "owner@example.com",
+                "password": "Strong-pw-9",
+                "confirm_password": "Strong-pw-9",
                 "role": "shop_owner",
                 "first_name": "Olivia",
                 "last_name": "Owner",

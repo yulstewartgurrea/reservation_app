@@ -34,8 +34,9 @@ class CustomerAccountTests(TestCase):
             "/api/auth/register/",
             {
                 "email": "newcust@example.com",
-                "username": "newcust",
-                "password": "strong-pw-9",
+                "confirm_email": "newcust@example.com",
+                "password": "Strong-pw-9",
+                "confirm_password": "Strong-pw-9",
                 "role": "customer",
             },
             format="json",
@@ -47,8 +48,9 @@ class CustomerAccountTests(TestCase):
             "/api/auth/register/",
             {
                 "email": "x@example.com",
-                "username": "x",
-                "password": "strong-pw-9",
+                "confirm_email": "x@example.com",
+                "password": "Strong-pw-9",
+                "confirm_password": "Strong-pw-9",
                 "role": "admin",  # not allowed via public register
             },
             format="json",

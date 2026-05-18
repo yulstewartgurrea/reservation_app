@@ -2,7 +2,7 @@ from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .availability import compute_slots
+from .availability import compute_slots, compute_slots_any
 from .models import Reservation
 from .serializers import (
     AvailabilityRequestSerializer,
@@ -68,7 +68,11 @@ class ReservationViewSet(viewsets.ModelViewSet):
         serializer = AvailabilityRequestSerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         d = serializer.validated_data
-        slots = compute_slots(d["shop"], d["service"], d.get("staff"), d["date"])
+        staff = d.get("staff")
+        if staff is not None:
+            slots = compute_slots(d["shop"], d["service"], staff, d["date"])
+        else:
+            slots = compute_slots_any(d["shop"], d["service"], d["date"])
         return Response([
             {"start_at": s.start_at.isoformat(), "end_at": s.end_at.isoformat()}
             for s in slots

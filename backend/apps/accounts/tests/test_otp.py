@@ -94,8 +94,9 @@ class OtpEndpointTests(TestCase):
             "/api/auth/register/",
             {
                 "email": "new@example.com",
-                "username": "newuser",
-                "password": "supersecret9",
+                "confirm_email": "new@example.com",
+                "password": "Supersecret9!",
+                "confirm_password": "Supersecret9!",
                 "role": "customer",
             },
             format="json",
@@ -106,6 +107,36 @@ class OtpEndpointTests(TestCase):
         self.assertTrue(EmailOTP.objects.filter(user=user).exists())
         self.assertEqual(len(mail.outbox), 1)
         self.assertIn("verification code", mail.outbox[0].subject.lower())
+
+    def _register(self, **overrides):
+        payload = {
+            "email": "new@example.com",
+            "confirm_email": "new@example.com",
+            "password": "Supersecret9!",
+            "confirm_password": "Supersecret9!",
+            "role": "customer",
+        }
+        payload.update(overrides)
+        return self.client.post("/api/auth/register/", payload, format="json")
+
+    def test_register_rejects_mismatched_email(self):
+        response = self._register(confirm_email="other@example.com")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("confirm_email", response.json())
+        self.assertFalse(User.objects.filter(email="new@example.com").exists())
+
+    def test_register_rejects_mismatched_password(self):
+        response = self._register(confirm_password="Different9!")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("confirm_password", response.json())
+        self.assertFalse(User.objects.filter(email="new@example.com").exists())
+
+    def test_register_rejects_weak_password(self):
+        # all lowercase, no number/symbol — fails complexity
+        response = self._register(password="weakpassword", confirm_password="weakpassword")
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("password", response.json())
+        self.assertFalse(User.objects.filter(email="new@example.com").exists())
 
     def test_verify_otp_endpoint_marks_verified_and_returns_tokens(self):
         user = User.objects.create_user(

@@ -97,7 +97,10 @@ def compute_slots(shop, service, staff: Staff | None, target_date: date) -> list
     if window is None:
         return []
     if staff is not None:
-        window = _intersect(window, _staff_window(staff, target_date))
+        staff_window = _staff_window(staff, target_date)
+        if staff_window is None:
+            return []  # staff is off / has no hours that weekday
+        window = _intersect(window, staff_window)
         if window is None:
             return []
 
@@ -122,3 +125,84 @@ def compute_slots(shop, service, staff: Staff | None, target_date: date) -> list
         cursor += step
 
     return slots
+
+
+def eligible_staff(shop, service) -> list[Staff]:
+    """Active staff who may perform this service.
+
+    If the service has explicit `eligible_staff` configured, restrict to that
+    set; otherwise any active staff at the shop is eligible (backward
+    compatible — existing shops never configured StaffService).
+    """
+    qs = Staff.objects.filter(shop=shop, is_active=True)
+    configured_ids = list(service.eligible_staff.values_list("id", flat=True))
+    if configured_ids:
+        qs = qs.filter(id__in=configured_ids)
+    return list(qs.order_by("id"))
+
+
+def compute_slots_any(shop, service, target_date: date) -> list[Slot]:
+    """Union of availability across every eligible active staff member.
+
+    A time is offered if at least one eligible staff is free for the full
+    duration + buffer. Shops with no staff fall back to the shop-level
+    (unassigned) computation so staff-less shops keep working as before.
+    """
+    staff_list = eligible_staff(shop, service)
+    if not staff_list:
+        return compute_slots(shop, service, None, target_date)
+
+    seen: dict[datetime, Slot] = {}
+    for staff in staff_list:
+        for slot in compute_slots(shop, service, staff, target_date):
+            seen.setdefault(slot.start_at, slot)
+    return [seen[key] for key in sorted(seen)]
+
+
+def _staff_is_free(shop, service, staff: Staff, start_at: datetime) -> bool:
+    """Whether `staff` has no conflicting booking/time-block for the slot.
+
+    Conflict-only on purpose: like the rest of the booking-create path, this
+    does not re-validate shop/staff working hours (that is the availability
+    layer's job — `compute_slots`). Keeping create conflict-only preserves
+    the pre-existing contract that the server trusts the submitted time and
+    only guards against double-booking and past times.
+    """
+    end_at = start_at + timedelta(minutes=service.duration_minutes)
+    block_end = end_at + timedelta(minutes=service.buffer_minutes)
+    return not _has_conflict(shop, staff, start_at, block_end)
+
+
+def assign_least_loaded_staff(shop, service, start_at: datetime) -> Staff | None:
+    """Pick the eligible staff free at `start_at` with the fewest bookings
+    that day. Deterministic tie-break on staff id. Returns None if no
+    eligible staff is free (caller should treat as a slot conflict).
+    """
+    free = [
+        staff
+        for staff in eligible_staff(shop, service)
+        if _staff_is_free(shop, service, staff, start_at)
+    ]
+    if not free:
+        return None
+
+    tz = timezone.get_current_timezone()
+    day = timezone.localtime(start_at).date()
+    day_start = datetime.combine(day, time.min, tzinfo=tz)
+    day_end = day_start + timedelta(days=1)
+    blocking = [
+        Reservation.Status.PENDING,
+        Reservation.Status.CONFIRMED,
+        Reservation.Status.COMPLETED,
+    ]
+
+    def load(staff: Staff) -> int:
+        return Reservation.objects.filter(
+            staff=staff,
+            status__in=blocking,
+            start_at__gte=day_start,
+            start_at__lt=day_end,
+        ).count()
+
+    free.sort(key=lambda s: (load(s), s.id))
+    return free[0]
