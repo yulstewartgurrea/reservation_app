@@ -1,0 +1,12 @@
+Hi {{ owner_name }},
+
+Heads-up: an upcoming appointment at {{ shop.name }}.
+
+Customer: {{ customer_name }}
+Service: {{ service.name }}
+When: {{ start_at|date:"l, F j" }} at {{ start_at|time:"g:i A" }}
+
+Open BookMe to view or manage this booking:
+{{ frontend_url }}
+
+— BookMe

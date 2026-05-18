@@ -117,3 +117,26 @@ class CommissionLedger(models.Model):
     class Meta:
         ordering = ["-created_at"]
         indexes = [models.Index(fields=["shop", "period"])]
+
+
+class ReservationReminder(models.Model):
+    """One row per reminder actually dispatched for a reservation.
+
+    The unique (reservation, offset) constraint makes the periodic Beat
+    scanner idempotent: a reminder for a given lead time is sent exactly
+    once even though the scan window overlaps several Beat ticks.
+    """
+
+    class Offset(models.TextChoices):
+        DAY = "24h", "24 hours before"
+        HOUR = "1h", "1 hour before"
+
+    reservation = models.ForeignKey(
+        Reservation, on_delete=models.CASCADE, related_name="reminders"
+    )
+    offset = models.CharField(max_length=4, choices=Offset.choices)
+    sent_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ("reservation", "offset")
+        ordering = ["-sent_at"]

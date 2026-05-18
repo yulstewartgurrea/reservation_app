@@ -221,6 +221,10 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.notifications.tasks.dispatch_due_maintenance_reminders",
         "schedule": 3600.0,  # hourly is plenty for "due in 6 months" cadences
     },
+    "dispatch-reservation-reminders": {
+        "task": "apps.reservations.tasks.dispatch_due_reminders",
+        "schedule": 600.0,  # every 10 min; < REMINDER_LATE_GRACE so none are missed
+    },
 }
 
 EMAIL_BACKEND = env("EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend")
