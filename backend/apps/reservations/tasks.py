@@ -53,7 +53,7 @@ def send_booking_confirmation_email(reservation_id: int) -> str:
 
     sent = send_template_email(
         to=reservation.customer.email,
-        subject=f"Booking confirmed at {reservation.shop.name}",
+        subject=f"We received your booking at {reservation.shop.name}",
         text_template="emails/booking_confirmation.txt",
         html_template="emails/booking_confirmation.html",
         context={

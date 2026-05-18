@@ -1,14 +1,14 @@
 {% extends "emails/_base.html" %}
-{% block title %}Booking confirmed &middot; BookMe{% endblock %}
-{% block preheader %}Your booking at {{ shop.name }} on {{ start_at|date:"l, F j" }} is confirmed.{% endblock %}
+{% block title %}Booking request received &middot; BookMe{% endblock %}
+{% block preheader %}We received your booking request at {{ shop.name }} for {{ start_at|date:"l, F j" }} — the shop will confirm shortly.{% endblock %}
 {% block content %}
   <div style="text-align:center;margin:0 0 18px 0;">
-    <span style="display:inline-block;background:#ecfdf5;color:#047857;font-size:12px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;padding:5px 12px;border-radius:999px;">Confirmed</span>
+    <span style="display:inline-block;background:#fffbeb;color:#b45309;font-size:12px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;padding:5px 12px;border-radius:999px;">Pending confirmation</span>
   </div>
 
-  <h1 style="margin:0 0 8px 0;font-size:24px;font-weight:700;color:#0f172a;text-align:center;letter-spacing:-0.01em;">Your booking is set</h1>
+  <h1 style="margin:0 0 8px 0;font-size:24px;font-weight:700;color:#0f172a;text-align:center;letter-spacing:-0.01em;">Booking request received</h1>
   <p style="margin:0 0 24px 0;font-size:15px;line-height:1.6;color:#475569;text-align:center;">
-    Hi {{ customer_name }}, here are the details of your booking at <strong style="color:#0f172a;">{{ shop.name }}</strong>.
+    Hi {{ customer_name }}, we&rsquo;ve sent your request to <strong style="color:#0f172a;">{{ shop.name }}</strong>. You&rsquo;ll get a confirmation email once the shop accepts it.
   </p>
 
   <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 24px 0;background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;">
