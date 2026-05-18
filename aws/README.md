@@ -211,6 +211,79 @@ terragrunt apply -replace='aws_iam_access_key.smtp'
 cd ../ecs && terragrunt apply   # picks up the new password from SSM
 ```
 
+## Connecting to staging Postgres from your laptop
+
+Stage RDS can be exposed on a public endpoint for local DB tooling (psql, TablePlus,
+local Django). It stays gated by the security group — only the VPC and the IPs you
+allowlist get through. **This is a non-prod convenience; never do this for prod.**
+
+### One-time setup
+
+1. **Find your public IP:**
+   ```bash
+   curl -s https://checkip.amazonaws.com
+   ```
+2. **Allowlist it.** Edit [accounts/stage/ap-southeast-1/region.hcl](accounts/stage/ap-southeast-1/region.hcl):
+   ```hcl
+   create_database_internet_gateway_route = true        # in the VPC block
+   rds_publicly_accessible                 = true        # in the RDS block
+   db_allowed_cidrs                        = ["203.0.113.7/32"]  # ← your IP from step 1
+   ```
+   Keep it a tight `/32`. Never `0.0.0.0/0`.
+3. **Apply networking first, then rds — order matters:**
+   ```bash
+   cd aws/accounts/stage/ap-southeast-1/networking
+   terragrunt apply        # adds the 0.0.0.0/0 → IGW route to the database route table
+   cd ../rds
+   terragrunt apply        # sets publicly_accessible = true on the instance
+   ```
+   **Why two layers, in this order:** AWS rejects moving an existing RDS instance to a
+   different subnet group in the same VPC (`InvalidVPCNetworkStateFault`). So the DB
+   stays in its original database subnet group; public reachability comes from adding an
+   internet-gateway route to that route table (the networking layer) plus
+   `publicly_accessible = true` (the rds layer). If you run `rds` before `networking`,
+   the endpoint gets a public IP but it isn't routable yet — connections will hang until
+   `networking` is applied.
+
+   ⚠️ Review the rds plan. Toggling `publicly_accessible` is an **in-place modify with a
+   brief connection blip**, not a replacement — confirm the plan says `~ update`, not
+   `-/+ replace`, before approving. Stage has `skip_final_snapshot = true` and no
+   deletion protection, so a surprise replace would lose data.
+
+### Connect
+
+Pull the credentials from SSM (the rds layer wrote them there):
+
+```bash
+PROFILE=reservation-stage; REGION=ap-southeast-1
+HOST=$(aws ssm get-parameter --name /reservation/stage/rds_host --query 'Parameter.Value' --output text --region $REGION --profile $PROFILE)
+USER=$(aws ssm get-parameter --name /reservation/stage/rds_username --query 'Parameter.Value' --output text --region $REGION --profile $PROFILE)
+PASS=$(aws ssm get-parameter --name /reservation/stage/rds_password --with-decryption --query 'Parameter.Value' --output text --region $REGION --profile $PROFILE)
+DB=$(aws ssm get-parameter --name /reservation/stage/rds_db_name --query 'Parameter.Value' --output text --region $REGION --profile $PROFILE)
+
+PGPASSWORD="$PASS" psql "host=$HOST port=5432 dbname=$DB user=$USER sslmode=require"
+```
+
+`sslmode=require` is mandatory — RDS rejects plaintext. For local Django, use the
+prebuilt connection URL (already SSL-required):
+
+```bash
+aws ssm get-parameter --name /reservation/stage/rds_connection_url --with-decryption \
+  --query 'Parameter.Value' --output text --region $REGION --profile $PROFILE
+```
+
+### When your IP changes
+
+Home/office IPs rotate. When you can't connect, re-check `curl -s https://checkip.amazonaws.com`,
+update `db_allowed_cidrs`, and re-apply the rds layer (SG-only change, ~10s, no DB restart).
+
+### Locking it back down
+
+Set `rds_publicly_accessible = false` and empty `db_allowed_cidrs`, `terragrunt apply`
+the **rds** layer first (drops the public IP while the IGW route still exists), then set
+`create_database_internet_gateway_route = false` and `terragrunt apply` the **networking**
+layer. Reverse order of the setup — the DB returns to fully private.
+
 ## Hitting the API
 
 After apply, the API is reachable at the **internal ALB DNS name**:

@@ -7,6 +7,18 @@ variable "database_subnet_ids" {
   type = list(string)
 }
 
+variable "rds_publicly_accessible" {
+  description = "If true, RDS is placed in public subnets with a public endpoint. Ingress is STILL restricted to the security group (VPC CIDR + db_allowed_cidrs). Use only for non-prod convenience."
+  type        = bool
+  default     = false
+}
+
+variable "db_allowed_cidrs" {
+  description = "Extra CIDRs allowed to reach Postgres in addition to the VPC CIDR — e.g. your laptop's public IP as \"203.0.113.7/32\". Keep this tight; never 0.0.0.0/0."
+  type        = list(string)
+  default     = []
+}
+
 variable "project_name" {
   type = string
 }

@@ -4,16 +4,25 @@ module "rds_security_group" {
   version = "~> 5.0"
 
   name        = "sgr-${var.project_name}-${var.env}-rds"
-  description = "PostgreSQL access from inside the VPC"
+  description = "PostgreSQL access from inside the VPC${length(var.db_allowed_cidrs) > 0 ? " + allowlisted external CIDRs" : ""}"
   vpc_id      = var.vpc_id
 
-  ingress_cidr_blocks = [var.vpc_cidr]
+  # VPC CIDR keeps ECS/worker/beat working; db_allowed_cidrs adds explicit
+  # external IPs (e.g. a developer laptop /32). Never put 0.0.0.0/0 here.
+  ingress_cidr_blocks = concat([var.vpc_cidr], var.db_allowed_cidrs)
   ingress_rules       = ["postgresql-tcp"]
 
   egress_cidr_blocks      = ["0.0.0.0/0"]
   egress_ipv6_cidr_blocks = []
   egress_rules            = ["all-all"]
 }
+
+# NOTE: We deliberately do NOT move the instance to a separate public subnet
+# group — AWS rejects moving an existing DB instance to a different subnet group
+# in the same VPC (InvalidVPCNetworkStateFault). Instead, public reachability is
+# achieved by adding an IGW route to the *existing* database route table (see the
+# networking layer's create_database_internet_gateway_route) and setting
+# publicly_accessible=true here. The instance stays in its original subnet group.
 
 module "rds" {
   count   = var.create_rds ? 1 : 0
@@ -38,8 +47,10 @@ module "rds" {
   password                    = random_password.db_password[0].result
   port                        = var.rds_settings.port
 
-  multi_az               = var.rds_settings.multi_az
-  db_subnet_group_name   = var.db_subnet_group_name
+  multi_az             = var.rds_settings.multi_az
+  publicly_accessible  = var.rds_publicly_accessible
+  db_subnet_group_name = var.db_subnet_group_name
+
   vpc_security_group_ids = [module.rds_security_group[0].security_group_id]
 
   backup_window                   = var.rds_settings.backup_window

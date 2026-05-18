@@ -32,6 +32,10 @@ locals {
   public_subnets_newbits   = 2
   database_subnets_newbits = 2
   vpce_list                = ["logs", "ecr.api", "ecr.dkr", "s3"]
+  # Non-prod: IGW route on the database route table so the publicly_accessible
+  # RDS endpoint is reachable from allowlisted IPs (see rds_publicly_accessible
+  # / db_allowed_cidrs below). Access stays SG-gated. Keep false for prod.
+  create_database_internet_gateway_route = true
 
   # ---------------------------------------------------------------------------
   # ECS
@@ -253,6 +257,16 @@ locals {
   # ---------------------------------------------------------------------------
   create_rds    = true
   create_aurora = false
+
+  # Non-prod convenience: expose RDS on a public endpoint so a local DB client
+  # (TablePlus, psql, local Django) can connect. Access is still gated by the
+  # security group — only the VPC and the IPs in db_allowed_cidrs get through.
+  # SECURITY: keep db_allowed_cidrs a tight /32 list. NEVER 0.0.0.0/0.
+  # Find your current public IP with:  curl -s https://checkip.amazonaws.com
+  # If your ISP rotates your IP you must update this and re-apply the rds layer.
+  rds_publicly_accessible = true
+  db_allowed_cidrs        = ["49.146.37.191/32"]
+
   rds_settings = {
     name                                  = "rds-${local.project_name}-${local.env}"
     engine                                = "postgres"
