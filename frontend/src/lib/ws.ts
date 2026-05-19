@@ -1,5 +1,7 @@
 "use client";
 
+import { API_ORIGIN } from "./api";
+
 export type WsNotification = {
   kind: string;
   title: string;
@@ -9,8 +11,12 @@ export type WsNotification = {
 
 function wsBase(): string | null {
   if (typeof window === "undefined") return null;
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-  return apiUrl.replace(/^http/, "ws");
+  // Explicit origin (local dev) → swap http→ws / https→wss.
+  if (API_ORIGIN) return API_ORIGIN.replace(/^http/, "ws");
+  // Same-origin (production): derive from the current page so it works on any
+  // host. CloudFront upgrades and routes /ws/* to the backend.
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${window.location.host}`;
 }
 
 function wsToken(): string | null {
@@ -75,8 +81,10 @@ export type ChatMessage = {
 export function absUrl(url: string | null | undefined): string | null {
   if (!url) return null;
   if (/^https?:\/\//i.test(url)) return url;
-  const base = (process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000").replace(/\/$/, "");
-  return `${base}${url.startsWith("/") ? "" : "/"}${url}`;
+  // Same-origin (production): keep it relative so it resolves against the
+  // current host. Explicit origin (local dev): prefix it.
+  if (!API_ORIGIN) return url.startsWith("/") ? url : `/${url}`;
+  return `${API_ORIGIN}${url.startsWith("/") ? "" : "/"}${url}`;
 }
 
 export function connectChatRoom(

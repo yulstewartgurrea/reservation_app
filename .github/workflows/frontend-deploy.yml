@@ -73,7 +73,10 @@ jobs:
           NEXT_PUBLIC_API_URL: ${{ vars.NEXT_PUBLIC_API_URL }}
         run: |
           if [ -z "$NEXT_PUBLIC_API_URL" ]; then
-            echo "::warning::NEXT_PUBLIC_API_URL is empty — frontend will not be able to reach the backend"
+            echo "NEXT_PUBLIC_API_URL not set — building with a same-origin relative API base (/api)."
+            echo "This is the intended production setup: CloudFront serves the app and routes /api/* + /ws/* to the backend on the same origin (no CORS, works on any domain)."
+          else
+            echo "NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL — building with an explicit API origin (override; only needed for split-origin setups)."
           fi
           npm run build
 
