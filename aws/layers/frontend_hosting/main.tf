@@ -72,12 +72,17 @@ resource "aws_cloudfront_origin_access_control" "frontend" {
 }
 
 locals {
+  # Custom domain is active only when both a domain list AND the shared hosted
+  # zone id are supplied. Until then the distribution uses the default
+  # *.cloudfront.net cert and no Route 53 records are touched.
+  use_custom_domain = length(var.frontend_domains) > 0 && var.route53_zone_id != ""
+
   has_backend       = var.backend_alb_arn != "" && var.backend_alb_dns_name != ""
   backend_origin_id = "alb-backend-${var.env}"
 
   # Managed cache/origin-request policy IDs (global, stable).
-  managed_caching_disabled_policy_id  = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
-  managed_caching_optimized_policy_id = "658327ea-f89d-4fab-a63d-7e88639e58f6"
+  managed_caching_disabled_policy_id   = "4135ea2d-6df8-44a3-9df3-4b5a84be39ad"
+  managed_caching_optimized_policy_id  = "658327ea-f89d-4fab-a63d-7e88639e58f6"
   managed_all_viewer_request_policy_id = "216adef6-5c7f-47e4-b989-5492eafa07d3"
 }
 
@@ -157,7 +162,7 @@ resource "aws_cloudfront_distribution" "frontend" {
   comment             = local.cdn_comment
   default_root_object = "index.html"
   price_class         = var.frontend_price_class
-  aliases             = var.frontend_cloudfront_alias
+  aliases             = local.use_custom_domain ? var.frontend_domains : []
   http_version        = "http2"
 
   origin {
@@ -253,10 +258,88 @@ resource "aws_cloudfront_distribution" "frontend" {
   }
 
   viewer_certificate {
-    cloudfront_default_certificate = length(var.frontend_cloudfront_alias) == 0
-    acm_certificate_arn            = length(var.frontend_cloudfront_alias) > 0 ? null : null
-    ssl_support_method             = length(var.frontend_cloudfront_alias) > 0 ? "sni-only" : null
-    minimum_protocol_version       = length(var.frontend_cloudfront_alias) > 0 ? "TLSv1.2_2021" : null
+    cloudfront_default_certificate = local.use_custom_domain ? null : true
+    acm_certificate_arn            = local.use_custom_domain ? aws_acm_certificate_validation.frontend[0].certificate_arn : null
+    ssl_support_method             = local.use_custom_domain ? "sni-only" : null
+    minimum_protocol_version       = local.use_custom_domain ? "TLSv1.2_2021" : null
+  }
+}
+
+# ---------------------------------------------------------------------------
+# Custom domain: ACM certificate (DNS-validated) + Route 53 records.
+#
+# CloudFront only reads ACM certs from us-east-1, so the cert uses the
+# aws.us-east-1 provider alias (declared in accounts/_common/providers.tf).
+# Validation CNAMEs and the public alias records go into the single bookme.ph
+# hosted zone owned by the `dns` layer (var.route53_zone_id).
+#
+# alias A/AAAA records work at the apex (bookme.ph) — a plain CNAME would not.
+# ---------------------------------------------------------------------------
+resource "aws_acm_certificate" "frontend" {
+  count    = local.use_custom_domain ? 1 : 0
+  provider = aws.us-east-1
+
+  domain_name               = var.frontend_domains[0]
+  subject_alternative_names = slice(var.frontend_domains, 1, length(var.frontend_domains))
+  validation_method         = "DNS"
+
+  lifecycle {
+    create_before_destroy = true
+  }
+}
+
+resource "aws_route53_record" "frontend_cert_validation" {
+  for_each = local.use_custom_domain ? {
+    for dvo in aws_acm_certificate.frontend[0].domain_validation_options :
+    dvo.domain_name => {
+      name   = dvo.resource_record_name
+      type   = dvo.resource_record_type
+      record = dvo.resource_record_value
+    }
+  } : {}
+
+  zone_id         = var.route53_zone_id
+  name            = each.value.name
+  type            = each.value.type
+  records         = [each.value.record]
+  ttl             = 60
+  allow_overwrite = true
+}
+
+resource "aws_acm_certificate_validation" "frontend" {
+  count    = local.use_custom_domain ? 1 : 0
+  provider = aws.us-east-1
+
+  certificate_arn         = aws_acm_certificate.frontend[0].arn
+  validation_record_fqdns = [for r in aws_route53_record.frontend_cert_validation : r.fqdn]
+}
+
+# Apex + subdomain -> CloudFront. Alias records are zone-apex safe and free.
+resource "aws_route53_record" "frontend_alias_a" {
+  for_each = local.use_custom_domain ? toset(var.frontend_domains) : []
+
+  zone_id = var.route53_zone_id
+  name    = each.value
+  type    = "A"
+
+  alias {
+    name                   = aws_cloudfront_distribution.frontend.domain_name
+    zone_id                = aws_cloudfront_distribution.frontend.hosted_zone_id
+    evaluate_target_health = false
+  }
+}
+
+resource "aws_route53_record" "frontend_alias_aaaa" {
+  for_each = local.use_custom_domain ? toset(var.frontend_domains) : []
+
+  zone_id = var.route53_zone_id
+  name    = each.value
+  type    = "AAAA"
+
+  alias {
+    name                   = aws_cloudfront_distribution.frontend.domain_name
+    zone_id                = aws_cloudfront_distribution.frontend.hosted_zone_id
+    evaluate_target_health = false
   }
 }
 

@@ -10,10 +10,16 @@ variable "frontend_bucket_name" {
   type        = string
 }
 
-variable "frontend_cloudfront_alias" {
-  description = "Optional list of custom domain aliases (CNAMEs) for the CloudFront distribution."
+variable "frontend_domains" {
+  description = "Custom hostnames this distribution serves. The first entry is the primary/canonical host (ACM cert common name); the rest become SANs + aliases. Empty = CloudFront default *.cloudfront.net cert only. e.g. stage [\"staging.bookme.ph\"], prod [\"bookme.ph\", \"www.bookme.ph\"]."
   type        = list(string)
   default     = []
+}
+
+variable "route53_zone_id" {
+  description = "Hosted zone ID of the root domain (from the dns layer). Required when frontend_domains is non-empty: ACM DNS-validation records and the alias A/AAAA records are written here."
+  type        = string
+  default     = ""
 }
 
 variable "frontend_price_class" {

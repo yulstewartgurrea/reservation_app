@@ -13,8 +13,18 @@ output "cloudfront_distribution_id" {
 }
 
 output "cloudfront_domain_name" {
-  description = "Public URL (e.g. dxxxxxx.cloudfront.net) — point your DNS here when ready."
+  description = "CloudFront domain (e.g. dxxxxxx.cloudfront.net). Always works; custom domains alias to this."
   value       = aws_cloudfront_distribution.frontend.domain_name
+}
+
+output "custom_domains" {
+  description = "Custom hostnames this distribution serves once DNS + ACM validate."
+  value       = var.frontend_domains
+}
+
+output "acm_certificate_arn" {
+  description = "us-east-1 ACM cert backing the custom domains (null when none configured)."
+  value       = local.use_custom_domain ? aws_acm_certificate.frontend[0].arn : null
 }
 
 output "github_deploy_role_arn" {

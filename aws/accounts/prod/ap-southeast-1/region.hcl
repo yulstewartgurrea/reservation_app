@@ -13,9 +13,11 @@ locals {
   # ---------------------------------------------------------------------------
   # Frontend hosting (S3 + CloudFront for the Next.js static export)
   # ---------------------------------------------------------------------------
-  frontend_bucket_name      = "s3-${local.project_name}-${local.env}-frontend"
-  frontend_cloudfront_alias = []   # add custom domains here when ACM cert exists
-  frontend_price_class      = "PriceClass_100"  # NA + EU only (cheapest tier)
+  frontend_bucket_name = "s3-${local.project_name}-${local.env}-frontend"
+  # Apex + www both serve the prod distribution (no redirect; both are aliases).
+  # Inert until the prod stack is actually applied — see aws/DOCUMENTATION.md.
+  frontend_domains     = ["bookme.ph", "www.bookme.ph"]
+  frontend_price_class = "PriceClass_100" # NA + EU only (cheapest tier)
 
   # GitHub repo allowed to assume the deploy role via OIDC.
   github_repo = "yulstewartgurrea/reservation_app"

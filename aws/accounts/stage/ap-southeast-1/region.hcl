@@ -81,7 +81,7 @@ locals {
     # ListBucket is required by django-storages' file_overwrite=False check
     # (it lists to confirm whether a key already exists before saving).
     {
-      actions = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
+      actions   = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
       resources = ["arn:aws:s3:::${local.media_bucket_name}/*"]
       effect    = "Allow"
       sid       = "S3MediaObjects"
@@ -281,7 +281,7 @@ locals {
     username                              = "db_admin"
     port                                  = 5432
     multi_az                              = false
-    backup_window                         = "18:00-21:00"   # UTC — quiet for PH (02:00-05:00 PHT)
+    backup_window                         = "18:00-21:00" # UTC — quiet for PH (02:00-05:00 PHT)
     backup_retention_period               = 7
     maintenance_window                    = "Sun:21:00-Sun:23:00"
     enabled_cloudwatch_logs_exports       = ["postgresql"]
@@ -328,9 +328,11 @@ locals {
   # ---------------------------------------------------------------------------
   # Frontend hosting (S3 + CloudFront for the Next.js static export)
   # ---------------------------------------------------------------------------
-  frontend_bucket_name      = "s3-${local.project_name}-${local.env}-frontend"
-  frontend_cloudfront_alias = []   # add custom domains here when ACM cert exists
-  frontend_price_class      = "PriceClass_100"  # NA + EU only (cheapest tier)
+  frontend_bucket_name = "s3-${local.project_name}-${local.env}-frontend"
+  # Custom domain. Cert + alias records are created automatically once the dns
+  # layer is applied and its zone_id flows in. Empty list = *.cloudfront.net only.
+  frontend_domains     = ["staging.bookme.ph"]
+  frontend_price_class = "PriceClass_100" # NA + EU only (cheapest tier)
 
   # GitHub repo allowed to assume the deploy role via OIDC.
   github_repo = "yulstewartgurrea/reservation_app"

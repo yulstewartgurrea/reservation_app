@@ -150,6 +150,7 @@ aws/
 │   │   └── ap-southeast-1/         #      region: Singapore (lowest latency to PH)
 │   │       ├── region.hcl          #      ★ the meaty config — ECS services, RDS, Redis, etc.
 │   │       │
+│   │       ├── dns/terragrunt.hcl           # ★ the single bookme.ph Route 53 zone (account-global)
 │   │       ├── networking/terragrunt.hcl   # stub: include base + layer
 │   │       ├── ecr/terragrunt.hcl
 │   │       ├── parameters/
@@ -168,6 +169,7 @@ aws/
 │           └── frontend_hosting/terragrunt.hcl
 │
 └── layers/                         # ── reusable Terraform modules ──
+    ├── dns/                        #    one public Route 53 hosted zone (bookme.ph)
     ├── networking/                 #    VPC + subnets + NAT + VPC endpoints + SGs
     ├── ecr/                        #    ECR repo + lifecycle policy
     ├── parameters/                 #    creates SSM params + Secrets Manager secrets from env.yaml
@@ -251,8 +253,9 @@ To force Terraform to re-set a value, taint it: `terragrunt taint 'aws_ssm_param
 ### `rds`
 
 **Creates**
-- DB security group (Postgres ingress from the VPC CIDR only)
+- DB security group (Postgres ingress from the VPC CIDR — plus any `db_allowed_cidrs`)
 - RDS instance (PostgreSQL via `terraform-aws-modules/rds/aws`)
+- Public DB subnet group (only when `rds_publicly_accessible = true`)
 - Random 24-char password (no special chars to keep connection strings simple)
 - SSM parameters with connection details:
   - `/${project}/${env}/rds_host` (String)
@@ -270,6 +273,18 @@ To force Terraform to re-set a value, taint it: `terragrunt taint 'aws_ssm_param
 
 **Maintenance + backup windows are set in UTC.** `18:00-21:00 UTC` is `02:00-05:00 PHT` — quiet
 hours in the Philippines.
+
+**Public access (non-prod convenience)** — `rds_publicly_accessible` + `db_allowed_cidrs` (rds
+layer) plus `create_database_internet_gateway_route` (networking layer) let a developer laptop
+connect directly. The instance stays in its **original database subnet group** — AWS rejects
+moving an existing instance to a different subnet group in the same VPC
+(`InvalidVPCNetworkStateFault`), which is why we don't create a separate public subnet group.
+Instead the networking layer adds a `0.0.0.0/0 → IGW` route to the database route table and the
+rds layer sets `publicly_accessible = true`. **Apply order: networking before rds.** Ingress is
+still SG-gated: `concat([vpc_cidr], db_allowed_cidrs)` — keep `db_allowed_cidrs` a tight `/32`
+list, never `0.0.0.0/0`. Toggling `publicly_accessible` is an in-place modify (brief blip), not
+a replace — always confirm the plan before approving. Prod must keep all three `false`/empty.
+Connection recipe is in [README.md → "Connecting to staging Postgres from your laptop"](README.md#connecting-to-staging-postgres-from-your-laptop).
 
 ### `redis`
 
@@ -388,9 +403,28 @@ ready.
 task's `secrets` block references the `/ses/*` SSM paths and will fail to start if they don't
 exist. See README "SES (transactional email) setup".
 
+### `dns`
+
+**Creates** — ONE public Route 53 hosted zone for the registered domain `bookme.ph` (bought at [dot.ph](https://www.dot.ph)).
+
+Single-account model, so a single zone serves every environment; each env's `frontend_hosting` layer writes its own ACM-validation + alias records into it:
+
+| Hostname | Distribution |
+|---|---|
+| `staging.bookme.ph` | stage CloudFront |
+| `bookme.ph`, `www.bookme.ph` | prod CloudFront |
+
+The zone lives under **stage** (`accounts/stage/ap-southeast-1/dns/`) — the live account — exactly like the account-level GitHub OIDC provider. The domain string is set once in `accounts/global.hcl` (`root_domain`).
+
+**The one manual step:** after applying this layer, read its `name_servers` output (4 entries) and paste them into the dot.ph dashboard → **Manage → bookme.ph → Nameservers**, replacing dot.ph's defaults. dot.ph remains the *registrar*; Route 53 becomes the *DNS host*. Propagation is minutes to a few hours; ACM DNS validation then completes on its own.
+
+**Apply order:** `dns` → (dot.ph nameserver change) → `frontend_hosting`. `frontend_hosting` reads `dns`'s `zone_id` via a terragrunt dependency, so the zone must exist first. Before `dns` is applied, `frontend_hosting` plans/applies fine with the default `*.cloudfront.net` cert (the dependency mocks `zone_id = ""`, which disables the custom-domain block).
+
 ### `frontend_hosting`
 
-**Creates** — S3 bucket (private, OAC-locked) + CloudFront distribution + GitHub OIDC provider + per-env deploy IAM role.
+**Creates** — S3 bucket (private, OAC-locked) + CloudFront distribution + GitHub OIDC provider + per-env deploy IAM role. When `frontend_domains` is set **and** the `dns` zone id is available, it also creates a us-east-1 ACM cert (DNS-validated) and apex/subdomain alias A+AAAA records.
+
+**Custom domain** — driven by `frontend_domains` in each env's `region.hcl` (stage `["staging.bookme.ph"]`, prod `["bookme.ph", "www.bookme.ph"]`; first entry is the cert common name, the rest are SANs + extra aliases). The cert lives in **us-east-1** (CloudFront requirement) via the `aws.us-east-1` provider alias. Apex works because Route 53 **alias** records are zone-apex safe (a CNAME is not). Prod serves both `bookme.ph` and `www.bookme.ph` directly — no redirect. Empty list ⇒ `*.cloudfront.net` only.
 
 Hosts the Next.js static export. The bucket is **not** publicly readable; CloudFront fetches via Origin Access Control. CloudFront `default_root_object = index.html` and 403/404 → `/index.html` so SPA-style client navigation and hard refreshes both work.
 
@@ -405,7 +439,7 @@ Hosts the Next.js static export. The bucket is **not** publicly readable; CloudF
 | `AWS_DEPLOY_ROLE_ARN` | `github_deploy_role_arn` |
 | `AWS_S3_BUCKET` | `bucket_name` |
 | `AWS_CLOUDFRONT_DISTRIBUTION_ID` | `cloudfront_distribution_id` |
-| `NEXT_PUBLIC_API_URL` | (your backend URL for that env) |
+| `NEXT_PUBLIC_API_URL` | **do not set** — leave unset so the build uses a same-origin relative `/api` base (CloudFront routes `/api/*` + `/ws/*` to the backend; works on any domain, no CORS). Only set for a deliberate split-origin setup. |
 
 Full deploy flow lives in [README.md](../README.md) under "Frontend deploy".
 
@@ -419,6 +453,7 @@ Full deploy flow lives in [README.md](../README.md) under "Frontend deploy".
 locals {
   stage_account_id   = "..."       # USER: your AWS account ID
   stage_profile_name = "reservation-stage"  # USER: matches ~/.aws/credentials
+  root_domain        = "bookme.ph"   # USER: the dot.ph-registered domain (one Route 53 zone)
 }
 ```
 
@@ -650,6 +685,49 @@ terragrunt apply
 
 Then wire the outputs into GitHub Environments (Settings → Environments → staging / prod → Variables):
 `AWS_DEPLOY_ROLE_ARN`, `AWS_S3_BUCKET`, `AWS_CLOUDFRONT_DISTRIBUTION_ID`, `NEXT_PUBLIC_API_URL`. See [README → Frontend deploy](../README.md#frontend-deploy-s3--cloudfront) for the full first-time runbook.
+
+### Custom domain (bookme.ph via dot.ph)
+
+Domain registered at [dot.ph](https://www.dot.ph). dot.ph stays the *registrar*; we delegate DNS to Route 53. One zone, one nameserver change, then it's all Terraform.
+
+**Live state (as of 2026-05-18):**
+
+| Fact | Value |
+|---|---|
+| Registered domain | `bookme.ph` (dot.ph; registered 2026-05-19, expires 2027-05-19, auto-renew **off**) |
+| Route 53 zone ID | `Z0098224309DW9ENSZFXV` (the `dns` layer — **applied**) |
+| AWS nameservers | `ns-1114.awsdns-11.org`, `ns-1747.awsdns-26.co.uk`, `ns-339.awsdns-42.com`, `ns-849.awsdns-42.net` |
+| Cutover status | ✅ **Live (verified 2026-05-18).** dot.ph set to "Own Nameservers" (the 4 above); delegation propagated; ACM cert for `staging.bookme.ph` = ISSUED; `https://staging.bookme.ph` serves the app over valid TLS. `dx1epgde94eqq.cloudfront.net` still works (kept in CORS). |
+| Prod (`bookme.ph` + `www.bookme.ph`) | Wired in code, **not applied** — no prod backend stack exists yet. Reuses this same zone (no second nameserver change). |
+
+Keep this table current when the cutover completes (flip the status to ✅) or if the zone is ever recreated (nameservers change on recreate).
+
+```bash
+# (1) Create the single bookme.ph hosted zone (stage account).
+cd aws/accounts/stage/ap-southeast-1/dns
+terragrunt apply
+terragrunt output name_servers      # 4 entries, e.g. ns-123.awsdns-45.com ...
+
+# (2) ONE-TIME MANUAL STEP — in the dot.ph dashboard:
+#     Manage → bookme.ph → Nameservers → replace dot.ph's defaults with the
+#     4 servers from step 1. Save. Propagation: minutes to a few hours.
+
+# (3) Stage: cert + alias records (staging.bookme.ph). Auto-reads the zone id.
+cd ../frontend_hosting
+terragrunt apply                    # ACM validates via DNS once NS propagate
+
+# (4) Stage backend URLs already point at https://staging.bookme.ph in
+#     parameters/env.yaml — re-apply parameters and restart tasks so emails
+#     and CORS use the new host:
+cd ../parameters && terragrunt apply
+aws ecs update-service --cluster ecs-reservation-stage \
+  --service svc-ecs-reservation-stage-api --force-new-deployment \
+  --profile reservation-stage --region ap-southeast-1
+```
+
+Verify: `https://staging.bookme.ph` serves the app; `https://dx1epgde94eqq.cloudfront.net` keeps working (it's still an alias and stays in CORS as a fallback).
+
+**Prod (`bookme.ph` + `www.bookme.ph`)** is wired in code (`frontend_domains` in prod `region.hcl`) but **inert** — prod has only the `frontend_hosting` skeleton; no prod `networking/rds/redis/ecs/ses/parameters` layers exist yet. Standing up the prod backend stack is a separate effort. Once it exists, `cd aws/accounts/prod/ap-southeast-1/frontend_hosting && terragrunt apply` adds the apex/www cert + alias records into the same zone (no second nameserver change — same `bookme.ph` zone). Until then, do **not** apply prod `frontend_hosting` expecting a working site: the static export would load with no API behind it.
 
 ### Frontend: deploy new code
 
