@@ -25,12 +25,14 @@ import {
 } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { useQuery } from "@tanstack/react-query";
 import { useUrlParams } from "@/lib/useUrlParams";
 import {
   ChevronDown,
   ChevronUp,
   Clock,
   FileText,
+  History,
   ImagePlus,
   Info as InfoIcon,
   MapPin,
@@ -41,6 +43,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatApiError } from "@/lib/errors";
+import { formatPhp } from "@/lib/format";
 import { iconForService } from "@/lib/serviceIcons";
 import { ConfirmationDialog } from "@/components/ConfirmationDialog";
 import { PageHeader } from "@/components/PageHeader";
@@ -72,6 +75,16 @@ type Photo = {
   is_primary: boolean;
 };
 type Shop = { id: number; name: string; city: string; country: string };
+
+type PriceChange = {
+  id: number;
+  service: number;
+  old_price: string;
+  new_price: string;
+  changed_by: number | null;
+  changed_by_name: string | null;
+  created_at: string;
+};
 
 type FormValues = {
   name: string;
@@ -504,6 +517,9 @@ export default function EditServicePage() {
         </label>
       </section>
 
+      {/* PRICE HISTORY — read-only audit of past price changes */}
+      <PriceHistory serviceId={serviceId} />
+
       {/* STICKY ACTION BAR — Delete on the left, Cancel/Save on the right */}
       <div className="sticky bottom-4 flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
         <button
@@ -657,6 +673,92 @@ function GalleryItem({
       </div>
     </li>
   );
+}
+
+/**
+ * Read-only audit of past price changes for a service. Self-contained: owns its
+ * own query so the rest of the page doesn't have to thread the data through.
+ * The backend scopes results to the owner's services (403 otherwise) and
+ * returns them newest-first, so we render in order.
+ */
+function PriceHistory({ serviceId }: { serviceId: string | undefined }) {
+  const { data, isLoading, isError, error } = useQuery({
+    queryKey: ["service-price-history", serviceId],
+    enabled: Boolean(serviceId),
+    queryFn: async () => {
+      const res = await api.get(`/services/${serviceId}/price-history/`);
+      const rows = res.data?.results ?? res.data;
+      return (rows ?? []) as PriceChange[];
+    },
+  });
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-6">
+      <div className="mb-5 flex items-start gap-3">
+        <div className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-brand-50 text-brand-600">
+          <History size={18} />
+        </div>
+        <div>
+          <h2 className="text-lg font-semibold text-slate-900">Price history</h2>
+          <p className="mt-0.5 text-sm text-slate-500">
+            Past changes to this service&apos;s price.
+          </p>
+        </div>
+      </div>
+
+      {isLoading ? (
+        <div className="space-y-3" aria-busy>
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className="flex flex-col gap-2 rounded-lg border border-slate-100 bg-slate-50 p-3"
+            >
+              <div className="h-4 w-40 animate-pulse rounded bg-slate-200" />
+              <div className="h-3 w-56 animate-pulse rounded bg-slate-200" />
+            </div>
+          ))}
+        </div>
+      ) : isError ? (
+        <p className="rounded-lg border border-red-100 bg-red-50 px-4 py-3 text-sm text-red-700">
+          {formatApiError(error, "Couldn’t load price history.")}
+        </p>
+      ) : !data || data.length === 0 ? (
+        <p className="rounded-lg border border-dashed border-slate-200 bg-slate-50 px-4 py-6 text-center text-sm text-slate-500">
+          No price changes yet. When you update this service&apos;s price, the
+          change will be logged here.
+        </p>
+      ) : (
+        <ul className="divide-y divide-slate-100">
+          {data.map((row) => (
+            <li key={row.id} className="py-3 first:pt-0 last:pb-0">
+              <div className="text-sm font-medium text-slate-900">
+                {formatPhp(row.old_price)}{" "}
+                <span className="text-slate-400">→</span>{" "}
+                {formatPhp(row.new_price)}
+              </div>
+              <div className="mt-0.5 text-xs text-slate-500">
+                by {row.changed_by_name ?? "—"} ·{" "}
+                {formatChangeDate(row.created_at)}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+/** Absolute date + time for an audit row, e.g. "May 19, 2026 · 1:08 AM". */
+function formatChangeDate(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const date = d.toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
+  const time = d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
+  return `${date} · ${time}`;
 }
 
 function Field({
