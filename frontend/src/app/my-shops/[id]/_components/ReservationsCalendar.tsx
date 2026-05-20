@@ -67,6 +67,10 @@ const MONTH_LONG = [
 
 const HOUR_HEIGHT = 48;
 const DEFAULT_SCROLL_HOUR = 7;
+// Max bookings shown side-by-side before the rest collapse into a "+N" tile.
+// Week columns are narrow; the Day view is full-width so it fits more.
+const WEEK_MAX_LANES = 3;
+const DAY_MAX_LANES = 6;
 
 function startOfDay(d: Date): Date {
   const x = new Date(d);
@@ -113,6 +117,7 @@ export function ReservationsCalendar({
 }) {
   const [view, setView] = useState<ViewMode>("week");
   const [cursor, setCursor] = useState<Date>(() => startOfDay(new Date()));
+  const [overflow, setOverflow] = useState<CalendarEvent[] | null>(null);
 
   const events: CalendarEvent[] = useMemo(
     () =>
@@ -200,13 +205,19 @@ export function ReservationsCalendar({
       </div>
 
       {view === "day" && (
-        <DayView day={cursor} events={events} onEventClick={onEventClick} />
+        <DayView
+          day={cursor}
+          events={events}
+          onEventClick={onEventClick}
+          onOverflowClick={setOverflow}
+        />
       )}
       {view === "week" && (
         <WeekView
           weekStart={startOfWeek(cursor)}
           events={events}
           onEventClick={onEventClick}
+          onOverflowClick={setOverflow}
         />
       )}
       {view === "month" && (
@@ -230,6 +241,96 @@ export function ReservationsCalendar({
           </span>
         ))}
       </div>
+
+      {overflow && (
+        <SlotBookingsModal
+          events={overflow}
+          onClose={() => setOverflow(null)}
+          onPick={(r) => {
+            setOverflow(null);
+            onEventClick?.(r);
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Lightweight modal listing every booking in a busy slot — opened from the
+ * "+N" overflow tile. Renders as a centered card on desktop and a near
+ * full-width sheet on phones; each row taps through to the booking detail.
+ */
+function SlotBookingsModal({
+  events,
+  onClose,
+  onPick,
+}: {
+  events: CalendarEvent[];
+  onClose: () => void;
+  onPick: (r: ReservationRow) => void;
+}) {
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
+  const sorted = [...events].sort((a, b) => a.start.getTime() - b.start.getTime());
+  const heading = sorted.length
+    ? `${sorted[0].start.toLocaleDateString([], { weekday: "short", month: "short", day: "numeric" })} · ${fmtTime(sorted[0].start)}`
+    : "";
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex items-end justify-center bg-slate-900/40 p-0 sm:items-center sm:p-4"
+      onClick={onClose}
+    >
+      <div
+        className="w-full max-w-md rounded-t-2xl bg-white shadow-xl sm:rounded-2xl"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
+          <div>
+            <div className="text-sm font-semibold text-slate-900">
+              {sorted.length} booking{sorted.length === 1 ? "" : "s"}
+            </div>
+            <div className="text-xs text-slate-500">{heading}</div>
+          </div>
+          <button
+            onClick={onClose}
+            aria-label="Close"
+            className="grid h-8 w-8 place-items-center rounded-full text-slate-500 hover:bg-slate-100"
+          >
+            ✕
+          </button>
+        </div>
+        <div className="max-h-[60vh] divide-y divide-slate-100 overflow-auto">
+          {sorted.map((e) => {
+            const c = STATUS_COLOR[e.status];
+            return (
+              <button
+                key={e.id}
+                onClick={() => onPick(e)}
+                className="flex w-full items-center gap-3 px-4 py-3 text-left transition hover:bg-slate-50 focus:bg-slate-50 focus:outline-none"
+              >
+                <span className={`mt-0.5 h-2.5 w-2.5 flex-shrink-0 rounded-full ${c.dot}`} />
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-sm font-medium text-slate-900">
+                    {e.service_name}
+                  </div>
+                  <div className="truncate text-xs text-slate-500">
+                    {fmtTime(e.start)}–{fmtTime(e.end)} · {e.customer_name ?? "—"}
+                  </div>
+                </div>
+                <span className={`flex-shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${c.bg} ${c.text}`}>
+                  {c.label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </div>
     </div>
   );
 }
@@ -238,6 +339,80 @@ function eventsForDay(events: CalendarEvent[], day: Date) {
   return events
     .filter((e) => sameDay(e.start, day))
     .sort((a, b) => a.start.getTime() - b.start.getTime());
+}
+
+type LaidOutItem =
+  | { kind: "event"; ev: CalendarEvent; lane: number; lanes: number }
+  | {
+      kind: "overflow";
+      lane: number;
+      lanes: number;
+      start: Date;
+      end: Date;
+      events: CalendarEvent[];
+    };
+
+/**
+ * Adaptive side-by-side layout for overlapping events.
+ *
+ * Events are grouped into clusters of transitively-overlapping bookings;
+ * within each cluster every event gets the first free lane (column) so two
+ * bookings in the same time slot sit next to each other instead of stacking
+ * (which would hide all but the top one). Width is driven by the lane count.
+ *
+ * To stay readable when a slot is busy (e.g. a shop with 10 stations all
+ * booked at 9 AM), the visible lane count is capped at `maxLanes`. Beyond the
+ * cap, the extra bookings collapse into a single `+N` overflow tile in the
+ * last lane; clicking it opens a list of every booking in that slot. The cap
+ * is smaller in the narrow Week columns and larger in the wide Day view.
+ *
+ * Assumes `events` is sorted by start time.
+ */
+function layoutDayEvents(events: CalendarEvent[], maxLanes: number): LaidOutItem[] {
+  const items: LaidOutItem[] = [];
+  let cluster: CalendarEvent[] = [];
+  let clusterEnd = -Infinity;
+
+  const flush = () => {
+    if (cluster.length === 0) return;
+    const laneEnds: number[] = []; // end time (ms) of the last event in each lane
+    const assigned: { ev: CalendarEvent; lane: number }[] = [];
+    for (const ev of cluster) {
+      let lane = laneEnds.findIndex((end) => end <= ev.start.getTime());
+      if (lane === -1) {
+        lane = laneEnds.length;
+        laneEnds.push(ev.end.getTime());
+      } else {
+        laneEnds[lane] = ev.end.getTime();
+      }
+      assigned.push({ ev, lane });
+    }
+    const laneCount = laneEnds.length;
+    if (laneCount <= maxLanes) {
+      for (const { ev, lane } of assigned)
+        items.push({ kind: "event", ev, lane, lanes: laneCount });
+    } else {
+      // Keep the first (maxLanes - 1) lanes visible; fold the rest into one tile.
+      const overflow: CalendarEvent[] = [];
+      for (const { ev, lane } of assigned) {
+        if (lane < maxLanes - 1) items.push({ kind: "event", ev, lane, lanes: maxLanes });
+        else overflow.push(ev);
+      }
+      const start = overflow.reduce((m, e) => (e.start < m ? e.start : m), overflow[0].start);
+      const end = overflow.reduce((m, e) => (e.end > m ? e.end : m), overflow[0].end);
+      items.push({ kind: "overflow", lane: maxLanes - 1, lanes: maxLanes, start, end, events: overflow });
+    }
+    cluster = [];
+    clusterEnd = -Infinity;
+  };
+
+  for (const ev of events) {
+    if (cluster.length > 0 && ev.start.getTime() >= clusterEnd) flush();
+    cluster.push(ev);
+    clusterEnd = Math.max(clusterEnd, ev.end.getTime());
+  }
+  flush();
+  return items;
 }
 
 function useScrollToWorkHours(deps: unknown[]) {
@@ -253,10 +428,12 @@ function DayView({
   day,
   events,
   onEventClick,
+  onOverflowClick,
 }: {
   day: Date;
   events: CalendarEvent[];
   onEventClick?: (r: ReservationRow) => void;
+  onOverflowClick?: (events: CalendarEvent[]) => void;
 }) {
   const dayEvents = eventsForDay(events, day);
   const scrollRef = useScrollToWorkHours([day.toDateString()]);
@@ -267,7 +444,13 @@ function DayView({
         style={{ gridTemplateColumns: "60px minmax(0, 1fr)" }}
       >
         <HourGutter />
-        <DayColumn day={day} events={dayEvents} onEventClick={onEventClick} />
+        <DayColumn
+          day={day}
+          events={dayEvents}
+          maxLanes={DAY_MAX_LANES}
+          onEventClick={onEventClick}
+          onOverflowClick={onOverflowClick}
+        />
       </div>
     </div>
   );
@@ -277,10 +460,12 @@ function WeekView({
   weekStart,
   events,
   onEventClick,
+  onOverflowClick,
 }: {
   weekStart: Date;
   events: CalendarEvent[];
   onEventClick?: (r: ReservationRow) => void;
+  onOverflowClick?: (events: CalendarEvent[]) => void;
 }) {
   const days = useMemo(
     () => Array.from({ length: 7 }, (_, i) => addDays(weekStart, i)),
@@ -327,7 +512,9 @@ function WeekView({
               key={d.toISOString()}
               day={d}
               events={eventsForDay(events, d)}
+              maxLanes={WEEK_MAX_LANES}
               onEventClick={onEventClick}
+              onOverflowClick={onOverflowClick}
             />
           ))}
         </div>
@@ -440,15 +627,35 @@ function HourGutter() {
 function DayColumn({
   day,
   events,
+  maxLanes,
   onEventClick,
+  onOverflowClick,
 }: {
   day: Date;
   events: CalendarEvent[];
+  maxLanes: number;
   onEventClick?: (r: ReservationRow) => void;
+  onOverflowClick?: (events: CalendarEvent[]) => void;
 }) {
   const isToday = sameDay(day, new Date());
   const now = new Date();
   const nowMin = now.getHours() * 60 + now.getMinutes();
+
+  function spanStyle(start: Date, end: Date, lane: number, lanes: number) {
+    const startMin = Math.max(0, start.getHours() * 60 + start.getMinutes());
+    const endMin = Math.min(
+      24 * 60,
+      end.getHours() * 60 + end.getMinutes() || startMin + 30
+    );
+    const laneWidth = 100 / lanes;
+    return {
+      top: (startMin / 60) * HOUR_HEIGHT,
+      height: Math.max(((endMin - startMin) / 60) * HOUR_HEIGHT, 22),
+      left: `calc(${lane * laneWidth}% + 2px)`,
+      width: `calc(${laneWidth}% - 4px)`,
+    };
+  }
+
   return (
     <div className="relative border-l border-slate-100">
       {Array.from({ length: 24 }, (_, h) => (
@@ -458,20 +665,28 @@ function DayColumn({
           className="border-t border-slate-100"
         />
       ))}
-      {events.map((e) => {
-        const startMin = Math.max(0, e.start.getHours() * 60 + e.start.getMinutes());
-        const endMin = Math.min(
-          24 * 60,
-          e.end.getHours() * 60 + e.end.getMinutes() || startMin + 30
-        );
-        const top = (startMin / 60) * HOUR_HEIGHT;
-        const height = Math.max(((endMin - startMin) / 60) * HOUR_HEIGHT, 22);
+      {layoutDayEvents(events, maxLanes).map((item) => {
+        if (item.kind === "overflow") {
+          const count = item.events.length;
+          return (
+            <button
+              key={`overflow-${item.start.getTime()}-${item.lane}`}
+              onClick={() => onOverflowClick?.(item.events)}
+              style={spanStyle(item.start, item.end, item.lane, item.lanes)}
+              title={`${count} more booking${count === 1 ? "" : "s"} at ${fmtTime(item.start)}`}
+              className="absolute grid place-items-center overflow-hidden rounded-md border border-slate-300 border-dashed bg-slate-100 px-1 text-[11px] font-semibold leading-tight text-slate-700 shadow-sm transition hover:bg-slate-200 focus:outline-none focus:ring-2 focus:ring-brand-400"
+            >
+              +{count}
+            </button>
+          );
+        }
+        const e = item.ev;
         const c = STATUS_COLOR[e.status];
         return (
           <button
             key={e.id}
             onClick={() => onEventClick?.(e)}
-            style={{ top, height, left: 4, right: 4 }}
+            style={spanStyle(e.start, e.end, item.lane, item.lanes)}
             title={`${e.service_name} · ${e.customer_name ?? "—"} · ${fmtTime(e.start)}–${fmtTime(e.end)}`}
             className={`absolute overflow-hidden rounded-md border text-left ${c.bg} ${c.border} ${c.text} px-2 py-1 text-[11px] leading-tight shadow-sm transition hover:shadow-md hover:brightness-95 focus:outline-none focus:ring-2 focus:ring-brand-400`}
           >
