@@ -51,6 +51,10 @@ def _make_shop(owner, *, commission_rate=None, cancellation_window_hours=None) -
             open_time=time(8, 0),
             close_time=time(20, 0),
         )
+    # Every shop needs at least one bookable Resource (its capacity).
+    from apps.shops.models import Resource
+
+    Resource.objects.create(shop=shop, name="Station 1")
     return shop
 
 

@@ -14,6 +14,7 @@ from .geocoding import geocode_address
 from .models import (
     Favorite,
     HoursOverride,
+    Resource,
     Shop,
     ShopCategory,
     ShopPhoto,
@@ -24,6 +25,7 @@ from .models import (
 from .serializers import (
     FavoriteSerializer,
     HoursOverrideSerializer,
+    ResourceSerializer,
     ShopCategorySerializer,
     ShopDetailSerializer,
     ShopListSerializer,
@@ -140,6 +142,7 @@ class ShopViewSet(viewsets.ModelViewSet):
                 data["latitude"], data["longitude"] = coords
         shop = serializer.save(owner=self.request.user)
         _ensure_default_hours(shop)
+        _ensure_default_resource(shop)
 
     def perform_update(self, serializer):
         data = serializer.validated_data
@@ -209,13 +212,53 @@ class ShopViewSet(viewsets.ModelViewSet):
             ShopListSerializer(shops, many=True, context={"request": request}).data
         )
 
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="commission-invoices",
+        permission_classes=[IsShopOwner],
+    )
+    def commission_invoices(self, request):
+        """This owner's commission invoices across all their shops."""
+        from apps.reservations.models import CommissionInvoice
+        from apps.reservations.serializers import CommissionInvoiceSerializer
+
+        qs = (
+            CommissionInvoice.objects.select_related("shop")
+            .filter(shop__owner=request.user)
+            .order_by("-period", "shop_id")
+        )
+        if (status_f := request.query_params.get("status")):
+            qs = qs.filter(status=status_f)
+        return Response(CommissionInvoiceSerializer(qs, many=True).data)
+
     @action(detail=True, methods=["post"], permission_classes=[IsShopOwner])
     def publish(self, request, pk=None):
         shop = self.get_object()
         if shop.owner_id != request.user.id:
             return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
+
+        from apps.reservations.commission_billing import _has_blocking_invoice
+
+        if _has_blocking_invoice(shop):
+            return Response(
+                {
+                    "detail": (
+                        "Settle the outstanding commission invoice before "
+                        "publishing this shop."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         shop.status = Shop.Status.ACTIVE
-        shop.save(update_fields=["status", "updated_at"])
+        shop.auto_paused_for_unpaid_commission = False
+        shop.save(
+            update_fields=[
+                "status",
+                "auto_paused_for_unpaid_commission",
+                "updated_at",
+            ]
+        )
         return Response(ShopDetailSerializer(shop, context={"request": request}).data)
 
     @action(detail=True, methods=["post"], permission_classes=[IsShopOwner])
@@ -443,6 +486,66 @@ def _ensure_default_hours(shop):
     ]
     if rows:
         WeekdayHours.objects.bulk_create(rows)
+
+
+def _ensure_default_resource(shop):
+    """Every shop needs at least one bookable Resource (its parallel capacity).
+
+    A brand-new shop starts at capacity 1 ("Station 1"); the owner adds more
+    (bays/chairs/rooms) and renames them via the Resource endpoints. Without
+    this, the shop would have zero capacity and offer no slots.
+    """
+    if not Resource.objects.filter(shop=shop).exists():
+        Resource.objects.create(shop=shop, name=f"{shop.resource_label} 1")
+
+
+class ResourceViewSet(viewsets.ModelViewSet):
+    """Owner-managed bookable Resources (the per-shop parallel capacity)."""
+
+    serializer_class = ResourceSerializer
+
+    def get_permissions(self):
+        if self.action in ("list", "retrieve"):
+            return [permissions.AllowAny()]
+        return [IsShopOwner()]
+
+    def get_queryset(self):
+        qs = Resource.objects.all()
+        shop_id = self.request.query_params.get("shop")
+        if shop_id:
+            qs = qs.filter(shop_id=shop_id)
+        if self.action == "list":
+            # Public callers only see active Resources; the owner sees all of
+            # their own (so they can re-activate a retired one).
+            user = self.request.user
+            owns = (
+                user.is_authenticated
+                and shop_id
+                and Shop.objects.filter(pk=shop_id, owner=user).exists()
+            )
+            if not owns:
+                qs = qs.filter(is_active=True)
+        if self.action in ("update", "partial_update", "destroy"):
+            qs = qs.filter(shop__owner=self.request.user)
+        return qs.order_by("id")
+
+    def perform_create(self, serializer):
+        shop = serializer.validated_data["shop"]
+        if shop.owner_id != self.request.user.id:
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied("You do not own this shop.")
+        serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        """Hard-delete only if unused; otherwise retire (is_active=False) so the
+        booking history that PROTECTs this Resource stays intact."""
+        resource = self.get_object()
+        if resource.reservations.exists():
+            resource.is_active = False
+            resource.save(update_fields=["is_active", "updated_at"])
+            return Response(ResourceSerializer(resource).data)
+        return super().destroy(request, *args, **kwargs)
 
 
 class StaffViewSet(viewsets.ModelViewSet):

@@ -3,6 +3,7 @@ from rest_framework import serializers
 from .models import (
     Favorite,
     HoursOverride,
+    Resource,
     Shop,
     ShopCategory,
     ShopPhoto,
@@ -10,6 +11,13 @@ from .models import (
     StaffWorkingHours,
     WeekdayHours,
 )
+
+
+class ResourceSerializer(serializers.ModelSerializer):
+    class Meta:
+        model = Resource
+        fields = ("id", "shop", "name", "is_active", "created_at")
+        read_only_fields = ("created_at",)
 
 
 class ShopCategorySerializer(serializers.ModelSerializer):
@@ -80,6 +88,7 @@ class ShopDetailSerializer(serializers.ModelSerializer):
     photos = ShopPhotoSerializer(many=True, read_only=True)
     cover_photo = serializers.SerializerMethodField()
     weekday_hours = WeekdayHoursSerializer(many=True, read_only=True)
+    resources = serializers.SerializerMethodField()
     services_count = serializers.SerializerMethodField()
     reviews_count = serializers.SerializerMethodField()
     total_bookings = serializers.SerializerMethodField()
@@ -105,11 +114,13 @@ class ShopDetailSerializer(serializers.ModelSerializer):
             "phone",
             "email",
             "status",
+            "resource_label",
             "commission_rate",
             "cancellation_window_hours",
             "photos",
             "cover_photo",
             "weekday_hours",
+            "resources",
             "services_count",
             "reviews_count",
             "total_bookings",
@@ -117,6 +128,11 @@ class ShopDetailSerializer(serializers.ModelSerializer):
             "updated_at",
         )
         read_only_fields = ("owner", "status", "commission_rate", "created_at", "updated_at")
+
+    def get_resources(self, obj) -> list:
+        return ResourceSerializer(
+            obj.resources.filter(is_active=True).order_by("id"), many=True
+        ).data
 
     def get_cover_photo(self, obj) -> str | None:
         """First photo by sort_order — same convention as `ShopListSerializer`."""
@@ -160,6 +176,7 @@ class ShopWriteSerializer(serializers.ModelSerializer):
             "longitude",
             "phone",
             "email",
+            "resource_label",
             "cancellation_window_hours",
         )
 

@@ -6,14 +6,25 @@ import { useUrlParams } from "@/lib/useUrlParams";
 import { CalendarDays, Info, User, UserPlus } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatApiError } from "@/lib/errors";
-import { nowDatetimeLocal } from "@/lib/format";
+import { formatPhp, nowDatetimeLocal } from "@/lib/format";
 import { PageHeader } from "@/components/PageHeader";
 
-type Service = { id: number; name: string; duration_minutes: number; price: string };
+type Service = {
+  id: number;
+  name: string;
+  duration_minutes: number;
+  price: string;
+  max_quantity: number;
+  unit_label: string;
+};
+
+type Resource = { id: number; name: string; is_active: boolean };
 
 type FormState = {
   service: string;
   start_at: string;
+  quantity: number;
+  resource: string; // "" = auto-assign any free station
   guest_name: string;
   guest_phone: string;
 };
@@ -21,9 +32,17 @@ type FormState = {
 const INITIAL_FORM: FormState = {
   service: "",
   start_at: "",
+  quantity: 1,
+  resource: "",
   guest_name: "",
   guest_phone: "",
 };
+
+/** Naive pluralization: "unit" → "units" when qty != 1. */
+function unitText(qty: number, unitLabel: string): string {
+  const label = unitLabel?.trim() || "unit";
+  return `${qty} ${qty === 1 ? label : `${label}s`}`;
+}
 
 /** Strips a "+63" or leading "0" so the visible input is always the 10-digit
  * subscriber number. Submit always re-prefixes with +63. */
@@ -43,6 +62,7 @@ export default function WalkInPage() {
   const { id } = useUrlParams<{ id: string }>("/my-shops/[id]/walk-in");
   const router = useRouter();
   const [services, setServices] = useState<Service[]>([]);
+  const [resources, setResources] = useState<Resource[]>([]);
   const [form, setForm] = useState<FormState>(INITIAL_FORM);
   const [error, setError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
@@ -53,11 +73,24 @@ export default function WalkInPage() {
       .get(`/services/`, { params: { shop: id } })
       .then((r) => setServices(r.data.results ?? r.data))
       .catch(() => setServices([]));
+    api
+      .get(`/shops/resources/`, { params: { shop: id } })
+      .then((r) => {
+        const list: Resource[] = r.data.results ?? r.data;
+        setResources(list.filter((x) => x.is_active));
+      })
+      .catch(() => setResources([]));
   }, [id]);
 
   function updateField<K extends keyof FormState>(key: K, value: FormState[K]) {
     setForm((prev) => ({ ...prev, [key]: value }));
   }
+
+  const selectedService = services.find(
+    (s) => String(s.id) === form.service
+  );
+  const maxQuantity = selectedService?.max_quantity ?? 1;
+  const showQuantity = maxQuantity > 1;
 
   async function onSubmit(e: FormEvent) {
     e.preventDefault();
@@ -68,6 +101,8 @@ export default function WalkInPage() {
         shop: Number(id),
         service: Number(form.service),
         start_at: new Date(form.start_at).toISOString(),
+        quantity: form.quantity,
+        ...(form.resource ? { resource: Number(form.resource) } : {}),
         guest_name: form.guest_name.trim(),
         guest_phone: toE164(form.guest_phone),
       });
@@ -99,18 +134,64 @@ export default function WalkInPage() {
             >
               <select
                 value={form.service}
-                onChange={(e) => updateField("service", e.target.value)}
+                onChange={(e) =>
+                  setForm((prev) => ({
+                    ...prev,
+                    service: e.target.value,
+                    quantity: 1,
+                  }))
+                }
                 required
                 className={inputClasses}
               >
                 <option value="">Select a service…</option>
                 {services.map((s) => (
                   <option key={s.id} value={s.id}>
-                    {s.name} ({s.duration_minutes} min · ${s.price})
+                    {s.name} ({s.duration_minutes} min · {formatPhp(s.price)})
                   </option>
                 ))}
               </select>
             </Field>
+            {showQuantity && (
+              <Field
+                label={`Quantity (${selectedService?.unit_label?.trim() || "unit"}s)`}
+                helper={`Up to ${unitText(
+                  maxQuantity,
+                  selectedService?.unit_label ?? "unit"
+                )}. Time and price scale with the quantity.`}
+              >
+                <div className="inline-flex items-stretch overflow-hidden rounded-md border border-slate-300">
+                  <button
+                    type="button"
+                    aria-label="Decrease quantity"
+                    onClick={() =>
+                      updateField("quantity", Math.max(1, form.quantity - 1))
+                    }
+                    disabled={form.quantity <= 1}
+                    className="flex h-11 w-11 items-center justify-center text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    –
+                  </button>
+                  <span className="flex h-11 min-w-[3rem] items-center justify-center border-x border-slate-300 px-3 text-base font-semibold text-slate-900">
+                    {form.quantity}
+                  </span>
+                  <button
+                    type="button"
+                    aria-label="Increase quantity"
+                    onClick={() =>
+                      updateField(
+                        "quantity",
+                        Math.min(maxQuantity, form.quantity + 1)
+                      )
+                    }
+                    disabled={form.quantity >= maxQuantity}
+                    className="flex h-11 w-11 items-center justify-center text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                  >
+                    +
+                  </button>
+                </div>
+              </Field>
+            )}
             <Field
               label="Start date & time"
               required
@@ -125,6 +206,25 @@ export default function WalkInPage() {
                 className={inputClasses}
               />
             </Field>
+            {resources.length > 0 && (
+              <Field
+                label="Station"
+                helper="Leave on auto-assign to use any free station, or pin this booking to a specific one."
+              >
+                <select
+                  value={form.resource}
+                  onChange={(e) => updateField("resource", e.target.value)}
+                  className={inputClasses}
+                >
+                  <option value="">Auto-assign (any free)</option>
+                  {resources.map((r) => (
+                    <option key={r.id} value={r.id}>
+                      {r.name}
+                    </option>
+                  ))}
+                </select>
+              </Field>
+            )}
           </div>
         </FormCard>
 

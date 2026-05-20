@@ -13,13 +13,17 @@ A reservation platform where shop owners (haircuts, spas, car washes, repairs, e
 
 ## Quick start
 
-Prereqs: Docker Desktop installed and running.
+Prereqs: Docker Desktop installed and running; Node 20+ for the frontend.
 
 ```bash
+# Backend stack (db, redis, web, worker, beat)
 docker compose up --build
+
+# Frontend — runs on the host, not in Docker
+cd frontend && npm install && npm run dev
 ```
 
-`backend/.env` ships with dev defaults (copy from `backend/.env.example` for fresh installs). On `web` startup the container runs `makemigrations → migrate → seed_categories → runserver`.
+`backend/.env` ships with dev defaults (copy from `backend/.env.example` for fresh installs). On `web` startup the container runs `makemigrations → migrate → seed_categories → runserver`. The frontend dev server expects the API at `http://localhost:8000` (override with `NEXT_PUBLIC_API_URL`).
 
 Create a superuser:
 
@@ -31,7 +35,7 @@ docker compose exec web python manage.py createsuperuser
 
 | Service     | URL                                                     | Notes                                   |
 |-------------|---------------------------------------------------------|-----------------------------------------|
-| Frontend    | http://localhost:3000                                   | Next.js                                 |
+| Frontend    | http://localhost:3000                                   | Next.js — run on the host (`npm run dev`), not in compose |
 | API         | http://localhost:8000/api/                              | DRF                                     |
 | API docs    | http://localhost:8000/api/docs/                         | Swagger UI (`drf-spectacular`)          |
 | Django admin| http://localhost:8000/admin/                            | Django admin                            |
@@ -61,7 +65,7 @@ Browser ──HTTPS──▶  CloudFront (dx1epgde94eqq.cloudfront.net)
 
 Single origin (`dx1epgde94eqq.cloudfront.net`) → no CORS, single HTTPS surface, backend ALB never gets a public IP. Set up in [aws/layers/frontend_hosting/main.tf](aws/layers/frontend_hosting/main.tf) via `aws_cloudfront_vpc_origin` (AWS provider ≥ 5.74).
 
-**Frontend env var:** `NEXT_PUBLIC_API_URL = https://dx1epgde94eqq.cloudfront.net` (origin only, no `/api` suffix) in the `staging` GitHub Environment — [frontend/src/lib/api.ts](frontend/src/lib/api.ts) appends `/api` internally, so including it in the env var produces `/api/api/...` and breaks every call.
+**Frontend API base is same-origin and relative.** Leave `NEXT_PUBLIC_API_URL` **unset** for deployed builds: [frontend/src/lib/api.ts](frontend/src/lib/api.ts) then uses a relative `/api` base (and [frontend/src/lib/ws.ts](frontend/src/lib/ws.ts) derives `wss://<current-host>/ws`), so the app works on **any** domain it's served from — `staging.bookme.ph`, the raw `*.cloudfront.net` URL, future prod `bookme.ph` — with no CORS and no per-domain rebuild. Only set the var for **local dev** (`frontend/.env.local` → `http://localhost:8000`) or a deliberate split-origin setup; when set it's the origin only (no `/api` suffix — that's appended internally).
 
 Find your own URLs anytime with:
 
@@ -74,7 +78,7 @@ AWS_PROFILE=reservation-stage aws elbv2 describe-load-balancers --region ap-sout
 
 ## Docker services
 
-`docker-compose.yml` defines 7 containers with hot-reload mounts for backend + frontend:
+`docker-compose.yml` defines 5 backend containers with hot-reload mounts. The frontend is **not** containerized — run it on the host with `cd frontend && npm run dev` (this matches prod, where the frontend is a static export to S3/CloudFront).
 
 | Container | Image / Build       | Purpose                                            |
 |-----------|---------------------|----------------------------------------------------|
@@ -83,7 +87,6 @@ AWS_PROFILE=reservation-stage aws elbv2 describe-load-balancers --region ap-sout
 | `web`     | `./backend`         | Django + DRF + Channels (Daphne via runserver)     |
 | `worker`  | `./backend`         | Celery worker — emails, reminders, no-show sweeps  |
 | `beat`    | `./backend`         | Celery Beat scheduler                              |
-| `frontend`| `./frontend`        | Next.js dev server                                 |
 
 ---
 
@@ -102,7 +105,7 @@ backend/
     notifications/       # Notification model, REST API, Channels consumer, signals, push helpers
     admin_panel/         # platform-admin endpoints (overview, pending shops, commission ledger)
     payments/            # Payment model, PayMongo client, checkout, webhook, refund
-  templates/emails/      # booking_confirmation, booking_reminder, verify_email, password_reset (txt+html)
+  templates/emails/      # booking_confirmation/_confirmed/_completed, booking_reminder, verify_email, password_reset (txt+html)
 frontend/
   src/
     app/                 # Next.js App Router pages (mobile-first responsive)
@@ -144,10 +147,12 @@ All in `backend/.env` (mirrors `backend/.env.example`).
 | `CELERY_RESULT_BACKEND` | `redis://redis:6379/2` | Celery results |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:3000` | Comma-separated origins |
 | `FRONTEND_URL` | `http://localhost:3000` | Used to build absolute links inside emails |
-| `DEFAULT_COMMISSION_RATE` | `0.10` | Platform fallback rate; override per-shop with `Shop.commission_rate` |
+| `DEFAULT_COMMISSION_RATE` | `0.15` | Platform fallback rate; override per-shop with `Shop.commission_rate` (e.g. `0` for an intro period) |
 | `DEFAULT_CANCELLATION_WINDOW_HOURS` | `24` | Hours-before-start cutoff for free cancel |
 | `STRIKE_LIMIT` | `3` | Strikes-in-window before customer is restricted |
 | `STRIKE_WINDOW_DAYS` | `90` | Rolling window for strikes |
+| `COMMISSION_INVOICE_DUE_DAYS` | `7` | Days from monthly invoice issue until it's due |
+| `COMMISSION_INVOICE_GRACE_DAYS` | `7` | Grace after due date; then the shop's new bookings auto-pause until paid |
 | `EMAIL_BACKEND` | `console` | `django.core.mail.backends.smtp.EmailBackend` for prod |
 | `EMAIL_HOST` / `EMAIL_PORT` / `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` / `EMAIL_USE_TLS` | — | SMTP config when not console |
 | `DEFAULT_FROM_EMAIL` | `Reserva <noreply@reserva.local>` | "From:" header |
@@ -165,7 +170,7 @@ All in `backend/.env` (mirrors `backend/.env.example`).
 All routes are prefixed `/api/` unless noted. JWT required except where marked **public**.
 
 ### Auth (`/api/auth/`)
-- **public** `POST register/` — create account (User created; a 6-digit OTP is emailed; client is expected to call `verify-otp/` next)
+- **public** `POST register/` — create account. Requires `email` + `confirm_email` (must match) and `password` + `confirm_password` (must match). Password must be ≥8 chars with an uppercase, lowercase, number, and special character. `username` is not collected — it mirrors the email server-side. On success a User is created, a 6-digit OTP is emailed, and the client is expected to call `verify-otp/` next.
 - **public** `POST login/` — JWT pair
 - **public** `POST refresh/` — refresh JWT
 - `GET / PATCH me/` — current user
@@ -182,6 +187,7 @@ All routes are prefixed `/api/` unless noted. JWT required except where marked *
 - **public** `GET nearby/?lat&lng&radius_km` — Haversine search
 - **public** `GET categories/` — shop categories
 - `GET mine/` — owner's shops (paginated 12/page, `page_size` overridable up to 48)
+- `GET commission-invoices/?status=` — owner's monthly commission invoices across all their shops
 - `POST /` — create shop (auto-geocoded if lat/lng blank)
 - `PATCH /<id>/` — edit shop
 - `POST /<id>/publish/` · `POST /<id>/pause/` — toggle status
@@ -190,6 +196,7 @@ All routes are prefixed `/api/` unless noted. JWT required except where marked *
 - `GET / POST /<id>/photos/` (multipart) · `DELETE /<id>/photos/<photo_id>/` — shop photos
 - `GET /<id>/analytics/?days=30` — owner-only analytics
 - Staff sub-resource: `GET /staff/?shop=<id>`, `POST/PATCH/DELETE /staff/<id>/`, `GET / PUT /staff/<id>/hours/`
+- Resources (bookable stations — the shop's capacity): `GET /resources/?shop=<id>` (public sees active only; owner sees all), `POST/PATCH/DELETE /resources/<id>/` (owner). DELETE soft-retires (`is_active=False`) if the resource has bookings, else hard-deletes. Per-shop display word is `Shop.resource_label` (Bay/Chair/Room/Slot; default "Station"), editable via `PATCH /shops/<id>/`.
 - Favorites: `GET / POST /favorites/`, `DELETE /favorites/<id>/` (customer-only)
 
 ### Services (`/api/services/`)
@@ -197,19 +204,22 @@ All routes are prefixed `/api/` unless noted. JWT required except where marked *
 - **public** `GET /<id>/`
 - **public** `GET discover/?q&city&category` — cross-shop search with shop info embedded (paginated 12/page, `page_size` overridable up to 50)
 - **public** `GET categories/` — service categories
-- `POST /` · `PATCH /<id>/` · `DELETE /<id>/`
+- `POST /` · `PATCH /<id>/` · `DELETE /<id>/` — create/update/delete (owner-only). A `PATCH` that changes `price` is routed through the service layer and appends a `ServicePriceHistory` row; existing bookings are unaffected (each reservation freezes its own `unit_price`)
+- `GET <id>/price-history/` — price-change audit trail (old/new/changed_by/created_at). Owner may view their **own** services; admin may view any
 - **public** `GET <id>/photos/` — list a service's gallery
 - `POST <id>/photos/` (multipart, owner-only) — upload a gallery photo (first upload becomes primary)
 - `DELETE <id>/photos/<photo_id>/` (owner-only) — remove a photo (next photo is auto-promoted if the deleted one was primary)
 - `POST <id>/photos/<photo_id>/primary/` (owner-only) — set a photo as the service's cover image
 
 ### Reservations (`/api/reservations/`)
-- **public** `GET availability/?shop&service&staff&date` — open slots (15-min granularity)
+- **public** `GET availability/?shop&service&staff&date&quantity` — open slots (15-min granularity). With `staff`: that staff's availability. Without `staff` ("Any available"): the **union** across all eligible active staff (a slot shows if ≥1 can take it); shops with no staff fall back to shop-level slots. `quantity` (optional, default 1) scales each slot's length by `duration_minutes × quantity + inter_unit_buffer_minutes × (quantity − 1)` (end-of-job buffer added once to the block window only); `quantity > service.max_quantity` → 400.
 - `GET /` — own reservations (customer) or shop's reservations (owner)
 - `GET /<id>/`
-- `POST book/` `{shop, service, staff?, start_at, customer_notes?, payment_method}` — customer booking
-- `POST walk-in/` `{shop, service, staff?, start_at, customer_id? OR guest_name+guest_phone}` — owner walk-in
-- `POST <id>/confirm/` · `complete/` · `no-show/` · `cancel/` · `reschedule/` `{start_at}`
+- `POST book/` `{shop, service, staff?, start_at, quantity?, customer_notes?, payment_method}` — customer booking
+- `POST walk-in/` `{shop, service, staff?, start_at, quantity?, customer_id? OR guest_name+guest_phone}` — owner walk-in
+- `POST <id>/confirm/` · `complete/` · `no-show/` · `cancel/` · `reschedule/` `{start_at, quantity?}`
+
+**Sequential quantity** (per-service opt-in): a `Service` offers a quantity selector only when `max_quantity > 1`. `quantity` (optional, default 1) multiplies `price` linearly and sets the visible appointment duration to `duration_minutes × quantity + inter_unit_buffer_minutes × (quantity − 1)`; the booking stays one staff / one contiguous block; the end-of-job `buffer_minutes` is added **once** to the conflict/block window only (never to `end_at`), not per unit. `inter_unit_buffer_minutes` (`Service`, PositiveInteger, default 0, owner-editable via `ServiceSerializer`) is the per-unit gap to move/reset between units of a multi-unit job (e.g. travel between aircon units) — applied for the N−1 gaps between units, never after the last unit and **never for a single-unit booking** (at N=1 the gap term is 0, so existing services and all 1-unit bookings are unchanged). The gap adds time but **no cost**: `total_price = unit_price × quantity`, so commission (derived from `total_price`) is unaffected by the gap. The duration formula lives in one place: `apps/reservations/availability.py::effective_duration_minutes`. `quantity < 1` or `> service.max_quantity` returns **400** with `{"non_field_errors": ["Quantity exceeds the maximum of N for this service."]}` (booking/availability serializers) or a string detail from the service layer. `Reservation.quantity` is read-only on the detail serializer; reschedule preserves the existing quantity unless a new one is passed. `unit_label` (default `"unit"`) is the noun shown next to the count.
 
 ### Reviews (`/api/reviews/`)
 - **public** `GET /` (filter `shop`, `rating`)
@@ -228,7 +238,9 @@ All routes are prefixed `/api/` unless noted. JWT required except where marked *
 - `POST reservations/<id>/checkout/` — customer; returns `{checkout_url, session_id, status}`
 - `POST reservations/<id>/refund/` — shop owner; full refund
 - `POST reservations/<id>/dev-confirm/` — dev-only (when `PAYMONGO_SECRET_KEY` is empty); marks paid without going through PayMongo
-- **public** `POST webhooks/paymongo/` — verifies HMAC SHA-256 signature, fans out `paid`/`failed`
+- `POST commission-invoices/<id>/pay/` — shop owner (own shop); returns `{payment_url}` for a monthly commission invoice
+- `POST commission-invoices/<id>/confirm-dev/` — dev-only; simulates payment of a commission invoice (owner-of-shop or admin)
+- **public** `POST webhooks/paymongo/` — verifies HMAC SHA-256 signature, fans out `paid`/`failed`; a `paid` event whose session matches a `CommissionInvoice` marks that invoice paid
 
 ### Chat (`/api/chat/`)
 - `GET rooms/` — paginated list of the requester's rooms, with `unread_count` + `last_message` preview
@@ -246,6 +258,10 @@ All routes are prefixed `/api/` unless noted. JWT required except where marked *
 - `GET pending-shops/` — shops awaiting approval
 - `POST shops/<id>/approve/` — flip to `active`
 - `GET commission/?period=YYYY-MM` — ledger rows + per-shop summary
+- `GET commission/invoices/?status=&shop=&period=` — monthly commission invoices (with `shop_name`, `outstanding`)
+- `POST commission/invoices/generate/` — generate/refresh invoices; body optional `{period: "YYYY-MM"}` (default: previous month)
+- `POST commission/invoices/<id>/settle/` — mark paid offline (bank/GCash)
+- `POST commission/invoices/<id>/void/` — void an open invoice
 
 ### WebSocket
 - `ws://.../ws/notifications/?token=<jwt>` — auto-joins `user.<id>` group, plus `shop.<id>` for each owned shop. Server pushes `{kind, title, body, payload}` events. Kinds: `booking.*`, `reminder`, `chat.new_message`, `chat.typing`, `presence.update`. Connecting/disconnecting this socket is also what flips a user's online flag (Redis-backed presence with a short reconnect grace period); presence changes fan out to every chat peer.
@@ -310,7 +326,8 @@ Mobile-first responsive across the board. Role-gated where indicated.
 |------|------|
 | `/admin` | Platform overview |
 | `/admin/pending-shops` | Approve queued shops |
-| `/admin/commission` | Commission ledger (per-shop summary + recent entries) |
+| `/admin/commission` | Commission ledger + monthly invoices (generate / settle offline / void) |
+| `/owner/billing` | Shop owner's monthly commission invoices (pay online / dev-confirm; overdue + auto-pause banner) |
 
 ---
 
@@ -331,8 +348,10 @@ Below: each feature with where it lives in the code.
 
 ### Shops & services
 - Shop fields: name, description, address, lat/lng (auto-geocoded via [Nominatim](backend/apps/shops/geocoding.py)), hours, status, commission_rate (override), cancellation_window_hours
-- `WeekdayHours`, `HoursOverride`, `ShopPhoto`, `Staff`, `StaffWorkingHours`, `TimeBlock`
+- `WeekdayHours`, `HoursOverride`, `ShopPhoto`, `Staff`, `StaffWorkingHours`, `TimeBlock`, `Resource`
+- **`Resource`** is the bookable capacity unit (bay/chair/room/table/slot). The number of active Resources at a shop = its parallel capacity; a reservation holds exactly one Resource and is the binding scheduling constraint. `Staff` is non-binding (an attribution / "request this person" note). See §8.17 in app_ideas.md.
 - Service fields: name, description, duration_minutes, buffer_minutes, price, eligible_staff
+- Price changes: editing `Service.price` is recorded in `ServicePriceHistory` (old/new/changed_by/created_at) via `apps/services/services.py::update_service` (service layer, not a signal). Prices freeze on already-booked reservations because each `Reservation` snapshots `unit_price` at booking; `total_price` is always derived from the stored `unit_price`, never re-read from `Service.price` (keeps commission/revenue historically correct). View history at `GET /api/services/<id>/price-history/`.
 - Service photos: multi-image gallery via `ServicePhoto` (`POST/DELETE /api/services/<id>/photos/`, `POST /api/services/<id>/photos/<photo_id>/primary/` to pick the cover). At most one photo per service is primary (partial unique constraint); first upload is auto-primary, and deleting the primary auto-promotes the next photo by `sort_order`. The `cover_photo` field on the service serializer always returns the primary (or first by `sort_order` as fallback).
 - Publish / pause flows
 
@@ -344,9 +363,13 @@ Below: each feature with where it lives in the code.
 - Frontend "Find shops near me" via browser Geolocation API; falls back to plain list on denial
 
 ### Booking & availability
-- [availability.py](backend/apps/reservations/availability.py): shop hours ∩ staff hours ∩ existing reservations ∩ time blocks ∩ overrides; 15-min granularity; never returns past slots
-- Customer booking + shop-owner walk-in (with guest_name/phone); staff selection optional ("Any available")
-- Reschedule flow checks the same availability constraints
+- **Resource-based scheduling.** A booking reserves one `Resource` (the binding unit). Capacity = number of active Resources; two bookings can never share a Resource at overlapping times. `Staff` is recorded but non-binding — the same staff may appear on overlapping bookings and the engine ignores it. See app_ideas.md §8.17.
+- [availability.py](backend/apps/reservations/availability.py): shop hours ∩ per-Resource reservations ∩ time blocks ∩ overrides; 15-min granularity; never returns past slots. `compute_slots_any` offers a time if **any** active Resource is free for the full duration + buffer.
+- On booking, the server allocates a free Resource inside the `@transaction.atomic` block with `select_for_update` over the shop's Resources (serialises concurrent bookers so a slot can't be double-allocated). If every Resource is busy → slot-conflict error.
+- Customer booking + shop-owner walk-in (with guest_name/phone). Staff selection is optional and non-binding ("No preference" by default; a requested staff is surfaced to the shop, not a guarantee). Walk-in may pin a specific Resource or auto-assign.
+- A `TimeBlock` with a `resource` set blocks just that Resource; with neither resource nor staff it's shop-wide; a staff-only block is informational (non-binding).
+- Reschedule re-allocates a Resource atomically (keeps the current one if still free, else any free one).
+- Migration `reservations/0007` backfills existing shops: each gets `max(1, active_staff)` Resources and every existing reservation is greedily assigned a non-conflicting one.
 
 ### Reservation lifecycle
 - `pending → confirmed → completed`, plus `cancelled_by_customer`, `cancelled_by_shop`, `no_show`
@@ -363,7 +386,13 @@ Below: each feature with where it lives in the code.
 - `CommissionLedger` row created when an online reservation is marked `completed`
 - Rate resolution: `Shop.commission_rate` if set, else `DEFAULT_COMMISSION_RATE`
 - Walk-ins are excluded
-- Settled off-platform; flip `settled_at` in Django admin
+
+### Commission invoicing & collection
+- **Flat 15%, one invoice per shop per month.** A `CommissionInvoice` (shop, `period` `YYYY-MM`, amount, status `open`/`paid`/`void`, `due_date`, `paid_at`, `settled_offline`) rolls up that month's unsettled `CommissionLedger` rows.
+- `generate-monthly-commission-invoices` Beat task (crontab: 1st of month, 02:00 UTC) bills the previous calendar month. Idempotent — re-running refreshes an open invoice's amount and never touches a `paid`/`void` one. Admins can also trigger it from the admin UI.
+- Shop owner pays via a PayMongo link (`POST /api/payments/commission-invoices/<id>/pay/` → checkout URL; the webhook stamps `settled_at` on that period's ledger rows on `paid`). Admin can instead mark it settled offline (bank/GCash) — same ledger effect.
+- `process-overdue-commission-invoices` Beat task (daily, 03:00 UTC) sends escalating reminders; `COMMISSION_INVOICE_GRACE_DAYS` after `due_date` the shop is auto-paused (`Shop.status = PAUSED` + `auto_paused_for_unpaid_commission`) so it drops out of search/booking. Paying (online or offline) auto-resumes only platform-paused shops — a manual owner pause is never clobbered. The owner `publish` action is refused while a blocking invoice is unpaid.
+- Owner UI: `/owner/billing`. Admin UI: the Invoices tab on `/admin/commission`.
 
 ### Online payments — PayMongo
 - Provider: PayMongo (PHP-only; supports GCash / GrabPay / Maya / Visa / Mastercard / JCB). **No Stripe.**
@@ -420,13 +449,16 @@ Below: each feature with where it lives in the code.
 ### Email
 
 **Already done in code:**
-- HTML + text templates in [backend/templates/emails/](backend/templates/emails/): `booking_confirmation`, `booking_reminder`, `verify_email`, `password_reset`, `email_otp`, `maintenance_reminder`
+- HTML + text templates in [backend/templates/emails/](backend/templates/emails/): `booking_confirmation`, `booking_confirmed`, `booking_completed`, `booking_reminder`, `owner_reminder`, `verify_email`, `password_reset`, `email_otp`, `maintenance_reminder`, `commission_invoice_issued`, `commission_invoice_paid`, `commission_invoice_overdue`
 - Single helper: [apps/core/emails.py](backend/apps/core/emails.py) `send_template_email` (multipart MIME, never raises)
 - Account flow helpers: [apps/accounts/emails.py](backend/apps/accounts/emails.py) → `send_otp_email`, `send_verification_email`, `send_password_reset_email`
 - Celery tasks:
-  - `send_booking_confirmation_email` (signal-driven on create)
-  - `schedule_reminders` — queues 24h + 1h booking reminders on creation via `apply_async(eta=…)`
+  - `send_booking_confirmation_email` (signal-driven on create — "booking requested")
+  - `send_booking_confirmed_email` / `send_booking_completed_email` — customer receipts fired off the `ReservationStatusHistory` signal when the shop owner **confirms** (pending → confirmed) or **completes** (→ completed) an appointment. Skipped for reservations with no customer (walk-ins) and for cancel/no-show transitions
+  - `dispatch_due_reminders` — Beat sweep every 10 min: emails **both the customer and the shop owner** a 24h-before and a 1h-before reminder. Idempotent via a `ReservationReminder(reservation, offset)` row; a `REMINDER_LATE_GRACE` (20 min) window means a missed Beat tick is recovered but a same-day booking never gets a stale "24h" reminder. Skips non-pending/confirmed and walk-ins (no customer).
   - `dispatch_due_maintenance_reminders` — hourly Beat sweep
+  - `generate_monthly_commission_invoices` — Beat (1st of month, 02:00 UTC): rolls the previous month's unsettled ledger into one `CommissionInvoice` per shop + emails the owner
+  - `process_overdue_commission_invoices` — Beat (daily, 03:00 UTC): escalating overdue reminders, then auto-pause after the grace window
 - Email OTP signup: [apps/accounts/otp.py](backend/apps/accounts/otp.py) issues a 6-digit code (10-min TTL, 5-attempt cap, 60s resend cooldown). Plaintext code is never persisted — only a hashed form
 
 **Signup → verify flow (already wired):**
@@ -495,7 +527,8 @@ Below: each feature with where it lives in the code.
 ### Admin dashboard
 - [overview](frontend/src/app/admin/page.tsx): shop counts (total/active/pending/paused), reservation counts, commission totals
 - [pending-shops](frontend/src/app/admin/pending-shops/page.tsx): one-click approve
-- [commission ledger](frontend/src/app/admin/commission/page.tsx): per-shop summary (settled / outstanding) + recent entries; `?period=YYYY-MM` filter
+- [commission ledger + invoices](frontend/src/app/admin/commission/page.tsx): Ledger view (per-shop summary + recent entries, `?period=YYYY-MM`) and Invoices view (generate / mark settled offline / void)
+- [owner billing](frontend/src/app/owner/billing/page.tsx): shop owner's monthly invoices — pay online, overdue + auto-pause banner
 - Backed by [admin_panel app](backend/apps/admin_panel/) and `IsAdmin` permission
 
 ### Shop analytics
@@ -552,6 +585,8 @@ Test settings module: [config/test_settings.py](backend/config/test_settings.py)
 | Suite | Covers |
 | --- | --- |
 | [reservations/tests/test_lifecycle.py](backend/apps/reservations/tests/test_lifecycle.py) | pending creation + history row, conflict detection, walk-in commission exclusion, commission rate (shop override + platform default), strike accrual + restriction, reschedule moves times + rejects on completed |
+| [reservations/tests/test_quantity.py](backend/apps/reservations/tests/test_quantity.py) | sequential per-service quantity: field defaults (1 / "unit"), duration & price scale linearly, buffer added once, scaled conflict window, max/min validation, reschedule preserves vs. explicitly changes quantity, book/walk-in/availability API with quantity + 400 when over max |
+| [reservations/tests/test_commission_billing.py](backend/apps/reservations/tests/test_commission_billing.py) | monthly invoice generation idempotency + correct sum, zero-commission shop skipped, paid/void invoices untouched on re-run, pay/settle stamps all period ledger rows `settled_at`, PayMongo paid-webhook + dev-confirm route to the invoice, overdue → auto-pause and pay → auto-resume, owner/admin permission boundaries |
 | [payments/tests/test_payments.py](backend/apps/payments/tests/test_payments.py) | dev-mode fake checkout URL, idempotent `start_checkout`, `mark_paid` auto-confirms reservation, valid + invalid PayMongo webhook signatures, checkout endpoint authorization, dev-confirm helper |
 | [accounts/tests/test_tokens.py](backend/apps/accounts/tests/test_tokens.py) | email-token round trip + expiry, password-token round trip, password-change invalidates outstanding reset tokens, verify-email endpoint, reset-request doesn't leak account existence, reset-confirm enforces minimum length |
 | [accounts/tests/test_otp.py](backend/apps/accounts/tests/test_otp.py) | OTP code generation + hashed persistence, prior unconsumed codes invalidated, resend cooldown, expiry, attempt cap, consumed-once semantics, register endpoint sends OTP, verify-otp endpoint returns JWTs + marks `email_verified_at`, request-otp doesn't leak unknown emails or re-send to already-verified users |
@@ -583,7 +618,7 @@ docker compose exec web python manage.py test --settings=config.test_settings
 docker compose logs -f web
 docker compose logs -f worker
 docker compose logs -f beat
-docker compose logs -f frontend
+# frontend logs print directly in the terminal running `npm run dev`
 
 # trigger a Celery task by hand
 docker compose exec worker celery -A config call apps.reservations.tasks.auto_mark_no_shows
@@ -690,7 +725,7 @@ For each, add these **Variables** (Variables tab, not Secrets — none of these 
 | `AWS_DEPLOY_ROLE_ARN` | stage `github_deploy_role_arn` | prod `github_deploy_role_arn` |
 | `AWS_S3_BUCKET` | `s3-reservation-stage-frontend` | `s3-reservation-prod-frontend` |
 | `AWS_CLOUDFRONT_DISTRIBUTION_ID` | stage `cloudfront_distribution_id` | prod `cloudfront_distribution_id` |
-| `NEXT_PUBLIC_API_URL` | backend URL (leave blank until deployed) | backend URL (leave blank until deployed) |
+| `NEXT_PUBLIC_API_URL` | **leave unset** (same-origin `/api`) | **leave unset** (same-origin `/api`) |
 
 Optional but recommended for `prod`: turn on **Required reviewers** to gate prod deploys behind a manual approval.
 
@@ -701,7 +736,7 @@ git push origin staging      # → staging deploys
 git push origin main         # → prod deploys
 ```
 
-Visit the CloudFront URL — site should load. (If `NEXT_PUBLIC_API_URL` is blank, API calls 404, but the SPA itself renders.)
+Visit the CloudFront URL — site should load and API calls work same-origin (CloudFront routes `/api/*` to the backend). No `NEXT_PUBLIC_API_URL` needed.
 
 > **If you pushed the workflow file *before* step 4** (configuring the GitHub Environment), the first run will fail at "Configure AWS credentials" because the env vars don't exist yet. That's expected. Finish step 4, then retrigger with:
 > ```bash
@@ -831,8 +866,8 @@ aws iam get-role --role-name iam-role-reservation-stage-frontend-deploy \
   --query 'Role.AssumeRolePolicyDocument.Statement[0].Condition.StringLike'
 ```
 
-**Site loads but API calls return 404 / CORS errors**
-`NEXT_PUBLIC_API_URL` is empty or wrong. Update the GitHub Environment variable, push an empty commit to retrigger build.
+**Site loads but API calls return "Network Error" / CORS errors**
+The build baked an explicit cross-origin `NEXT_PUBLIC_API_URL` (e.g. a hardcoded `*.cloudfront.net`) while the app is served from a different host. Fix: **delete** the `NEXT_PUBLIC_API_URL` GitHub variable so the build uses the same-origin relative `/api` base, then retrigger the build. (Backend `CORS_ALLOWED_ORIGINS` only matters for deliberate split-origin setups.)
 
 **Hard refresh on `/shops/123` returns 404 XML from S3**
 The SPA fallback rule on CloudFront isn't firing. Check the distribution's "Error pages" tab — should have rules for both 403 and 404 → `/index.html`. Re-apply [aws/layers/frontend_hosting](aws/layers/frontend_hosting/) if missing.

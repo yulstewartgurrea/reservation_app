@@ -45,6 +45,26 @@ class Shop(models.Model):
 
     status = models.CharField(max_length=20, choices=Status.choices, default=Status.PENDING)
 
+    resource_label = models.CharField(
+        max_length=32,
+        default="Station",
+        help_text=(
+            "The word this shop uses for its bookable Resources, shown in the "
+            'UI: "Bay" (carwash), "Chair" (salon), "Room" (spa/dental), '
+            '"Table" (restaurant), or "Slot". Purely cosmetic — it does not '
+            "change scheduling behaviour. See the Resource model."
+        ),
+    )
+
+    auto_paused_for_unpaid_commission = models.BooleanField(
+        default=False,
+        help_text=(
+            "True when the platform auto-paused this shop for an overdue unpaid "
+            "commission invoice. Lets auto-resume on payment flip it back ACTIVE "
+            "without clobbering an owner-initiated manual pause."
+        ),
+    )
+
     commission_rate = models.DecimalField(
         max_digits=5,
         decimal_places=4,
@@ -122,7 +142,24 @@ class TimeBlock(models.Model):
         related_name="time_blocks",
         null=True,
         blank=True,
-        help_text="If set, the block applies only to this staff member.",
+        help_text=(
+            "If set, the block is tied to this staff member. Since staff is "
+            "non-binding for scheduling (see Resource), a staff-only block is "
+            "informational and does NOT remove availability — set `resource` "
+            "to actually block capacity."
+        ),
+    )
+    resource = models.ForeignKey(
+        "shops.Resource",
+        on_delete=models.CASCADE,
+        related_name="time_blocks",
+        null=True,
+        blank=True,
+        help_text=(
+            "If set, blocks only this Resource (e.g. 'Bay 1 under "
+            "maintenance'). If both staff and resource are null, the block is "
+            "shop-wide and removes every Resource's availability."
+        ),
     )
     start_at = models.DateTimeField()
     end_at = models.DateTimeField()
@@ -151,6 +188,37 @@ class Staff(models.Model):
     class Meta:
         ordering = ["name"]
         verbose_name_plural = "Staff"
+
+    def __str__(self) -> str:
+        return f"{self.name} @ {self.shop.name}"
+
+
+class Resource(models.Model):
+    """A bookable physical capacity unit at a shop — a carwash bay, a salon
+    chair, a treatment room, a table, or an abstract "slot" for shops with no
+    physical station. THIS, not staff, is the binding scheduling constraint:
+    a reservation holds exactly one Resource for its time range and two
+    bookings can never share a Resource at overlapping times. The number of
+    Resource rows at a shop IS that shop's parallel capacity (2 bays => 2
+    concurrent carwashes). `Reservation.staff` is recorded for attribution
+    and "request this person" only — it never gates availability. Deferred to
+    a later version (deliberately, see app_ideas.md §8.17): multiple staff per
+    Resource, enforced per-staff calendars. v1 is strictly 1 Resource : 1
+    booking, optional non-binding staff.
+
+    A Resource has no calendar of its own — it follows the shop's hours and
+    date overrides. Mark `is_active=False` to retire one without deleting its
+    booking history; inactive Resources are excluded from availability.
+    """
+
+    shop = models.ForeignKey(Shop, on_delete=models.CASCADE, related_name="resources")
+    name = models.CharField(max_length=120)
+    is_active = models.BooleanField(default=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        ordering = ["id"]
 
     def __str__(self) -> str:
         return f"{self.name} @ {self.shop.name}"

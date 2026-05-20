@@ -9,9 +9,12 @@ import {
   ChevronDown,
   Clock,
   CreditCard,
+  Layers,
   Lock,
   MapPin,
+  Minus,
   Pencil,
+  Plus,
   Shield,
   Store,
   Tag,
@@ -20,7 +23,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatApiError } from "@/lib/errors";
-import { todayIso } from "@/lib/format";
+import { formatPhp, todayIso } from "@/lib/format";
 
 type Staff = { id: number; name: string; is_active: boolean };
 type Slot = { start_at: string; end_at: string };
@@ -58,7 +61,30 @@ type Service = {
   duration_minutes: number;
   price: string;
   cover_photo: string | null;
+  max_quantity: number;
+  unit_label: string;
+  inter_unit_buffer_minutes: number;
 };
+
+/**
+ * Mirrors the server's reservation duration: each unit takes
+ * `duration_minutes`, with `inter_unit_buffer_minutes` inserted between
+ * consecutive units. At N=1 this reduces to `duration_minutes` (no gaps).
+ */
+function reservedMinutes(svc: Service, qty: number): number {
+  const n = Math.max(1, qty);
+  return (
+    svc.duration_minutes * n +
+    (svc.inter_unit_buffer_minutes ?? 0) * (n - 1)
+  );
+}
+
+/** Naive pluralization: "unit" → "units" when qty != 1. */
+function unitText(qty: number, unitLabel: string): string {
+  const label = unitLabel?.trim() || "unit";
+  return `${qty} ${qty === 1 ? label : `${label}s`}`;
+}
+
 type Shop = { id: number; name: string; city: string; country: string };
 
 const NOTES_MAX = 250;
@@ -76,6 +102,7 @@ function BookPageInner() {
 
   const [staff, setStaff] = useState<Staff[]>([]);
   const [staffId, setStaffId] = useState<string>(""); // "" = any
+  const [quantity, setQuantity] = useState(1);
   const [date, setDate] = useState(() => todayIso());
   const [slots, setSlots] = useState<Slot[]>([]);
   const [chosen, setChosen] = useState<string | null>(null);
@@ -104,7 +131,12 @@ function BookPageInner() {
 
   useEffect(() => {
     if (!serviceId) return;
-    api.get(`/services/${serviceId}/`).then((r) => setService(r.data));
+    api.get(`/services/${serviceId}/`).then((r) => {
+      setService(r.data);
+      // Reset quantity for the newly-loaded service.
+      setQuantity(1);
+      setChosen(null);
+    });
   }, [serviceId]);
 
   useEffect(() => {
@@ -117,11 +149,12 @@ function BookPageInner() {
           service: serviceId,
           staff: staffId || undefined,
           date,
+          quantity,
         },
       })
       .then((r) => setSlots(r.data))
       .finally(() => setLoadingSlots(false));
-  }, [params.id, serviceId, date, staffId, refreshKey]);
+  }, [params.id, serviceId, date, staffId, quantity, refreshKey]);
 
   useEffect(() => {
     if (!staffId) {
@@ -139,6 +172,17 @@ function BookPageInner() {
     []
   );
 
+  const maxQuantity = service?.max_quantity ?? 1;
+  const showQuantity = maxQuantity > 1;
+
+  function changeQuantity(next: number) {
+    const clamped = Math.min(Math.max(next, 1), maxQuantity);
+    setQuantity(clamped);
+    // The chosen slot may no longer fit the longer block — drop it and let
+    // availability refetch with the new quantity.
+    setChosen(null);
+  }
+
   async function book() {
     if (!chosen || !serviceId) return;
     setSubmitting(true);
@@ -149,6 +193,7 @@ function BookPageInner() {
         service: Number(serviceId),
         staff: staffId ? Number(staffId) : null,
         start_at: chosen,
+        quantity,
         payment_method: paymentMethod,
         customer_notes: notes,
       });
@@ -179,8 +224,8 @@ function BookPageInner() {
 
   const chosenStaffLabel =
     staffId === ""
-      ? "Any available"
-      : staff.find((s) => String(s.id) === staffId)?.name ?? "Any available";
+      ? "No preference"
+      : staff.find((s) => String(s.id) === staffId)?.name ?? "No preference";
 
   return (
     <div className="space-y-5 py-4">
@@ -192,13 +237,14 @@ function BookPageInner() {
           <header>
             <h1 className="text-2xl font-semibold text-slate-900">Book your service</h1>
             <p className="mt-0.5 text-sm text-slate-500">
-              Choose a staff member, date, time, and payment method.
+              Pick a date and time, then choose how to pay. Requesting a staff
+              member is optional.
             </p>
           </header>
 
           {/* Staff + Date */}
           <div className="mt-6 grid gap-4 sm:grid-cols-2">
-            <Field icon={User} label="Staff">
+            <Field icon={User} label="Staff (optional)">
               <div className="relative">
                 <Users
                   size={16}
@@ -212,7 +258,7 @@ function BookPageInner() {
                   }}
                   className="w-full appearance-none rounded-lg border border-slate-300 bg-white py-2.5 pl-9 pr-9 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
                 >
-                  <option value="">Any available</option>
+                  <option value="">No preference</option>
                   {staff.map((s) => (
                     <option key={s.id} value={s.id}>
                       {s.name}
@@ -246,6 +292,53 @@ function BookPageInner() {
             </Field>
           </div>
 
+          {showQuantity && (
+            <>
+              <Divider />
+              <section>
+                <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-900">
+                  <Layers size={16} className="text-brand-600" />
+                  How many {service ? `${service.unit_label?.trim() || "unit"}s` : "units"}?
+                </h2>
+                <p className="mt-0.5 text-sm text-slate-500">
+                  Book up to {unitText(maxQuantity, service?.unit_label ?? "unit")} in
+                  one reservation. Time and price scale with the quantity.
+                </p>
+                <div className="mt-3 flex items-center gap-3">
+                  <div className="inline-flex items-stretch overflow-hidden rounded-lg border border-slate-300">
+                    <button
+                      type="button"
+                      aria-label="Decrease quantity"
+                      onClick={() => changeQuantity(quantity - 1)}
+                      disabled={quantity <= 1}
+                      className="flex h-11 w-11 items-center justify-center text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <Minus size={16} />
+                    </button>
+                    <span
+                      aria-live="polite"
+                      className="flex h-11 min-w-[3rem] items-center justify-center border-x border-slate-300 px-3 text-base font-semibold text-slate-900"
+                    >
+                      {quantity}
+                    </span>
+                    <button
+                      type="button"
+                      aria-label="Increase quantity"
+                      onClick={() => changeQuantity(quantity + 1)}
+                      disabled={quantity >= maxQuantity}
+                      className="flex h-11 w-11 items-center justify-center text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-40"
+                    >
+                      <Plus size={16} />
+                    </button>
+                  </div>
+                  <span className="text-sm text-slate-500">
+                    {unitText(quantity, service?.unit_label ?? "unit")}
+                  </span>
+                </div>
+              </section>
+            </>
+          )}
+
           <Divider />
 
           {/* Available times */}
@@ -253,22 +346,20 @@ function BookPageInner() {
             <div className="flex items-center justify-between">
               <h2 className="inline-flex items-center gap-2 text-sm font-semibold text-slate-900">
                 <Clock size={16} className="text-brand-600" />
-                {staffId === ""
-                  ? "Available times"
-                  : `${chosenStaffLabel}'s available times`}
+                Available times
               </h2>
               <span className="text-xs text-slate-500">Timezone: {timezone}</span>
             </div>
             {staffId === "" ? (
               <p className="mt-1 text-xs text-slate-500">
-                Across all staff — we&apos;ll assign an available team member.
+                Times reflect the shop&apos;s available capacity.
               </p>
             ) : (
-              staffHours && (
-                <p className="mt-1 text-xs text-slate-500">
-                  {summarizeHours(staffHours)}
-                </p>
-              )
+              <p className="mt-1 text-xs text-slate-500">
+                A requested staff member is a preference, not a guarantee — the
+                shop confirms who serves you.
+                {staffHours && ` ${summarizeHours(staffHours)}`}
+              </p>
             )}
             <div className="mt-3">
               {loadingSlots ? (
@@ -413,12 +504,20 @@ function BookPageInner() {
               <div className="grid grid-cols-3 gap-2 text-center">
                 <ServiceFact
                   icon={Tag}
-                  value={service ? `$${service.price}` : "—"}
+                  value={
+                    service
+                      ? formatPhp(Number(service.price) * quantity)
+                      : "—"
+                  }
                   label="Price"
                 />
                 <ServiceFact
                   icon={Clock}
-                  value={service ? `${service.duration_minutes} min` : "—"}
+                  value={
+                    service
+                      ? `${reservedMinutes(service, quantity)} min`
+                      : "—"
+                  }
                   label="Duration"
                 />
                 <ServiceFact
@@ -455,6 +554,16 @@ function BookPageInner() {
                     }
                   />
                   <SummaryRow icon={User} label="Staff" value={chosenStaffLabel} />
+                  {showQuantity && (
+                    <SummaryRow
+                      icon={Layers}
+                      label="Quantity"
+                      value={unitText(
+                        quantity,
+                        service?.unit_label ?? "unit"
+                      )}
+                    />
+                  )}
                   <SummaryRow
                     icon={CreditCard}
                     label="Payment"
@@ -473,10 +582,21 @@ function BookPageInner() {
                 <div className="flex items-baseline justify-between">
                   <span className="text-base font-semibold text-slate-900">Total</span>
                   <span className="text-2xl font-semibold text-slate-900">
-                    {service ? `$${service.price}` : "—"}
+                    {service
+                      ? formatPhp(Number(service.price) * quantity)
+                      : "—"}
                   </span>
                 </div>
-                <p className="mt-0.5 text-xs text-slate-500">Taxes may apply.</p>
+                {showQuantity && service && (
+                  <p className="mt-0.5 text-xs text-slate-500">
+                    {formatPhp(Number(service.price))} ×{" "}
+                    {unitText(quantity, service.unit_label)} ·{" "}
+                    {reservedMinutes(service, quantity)} min total
+                  </p>
+                )}
+                <p className="mt-0.5 text-xs text-slate-500">
+                  Final price &amp; time are confirmed on booking.
+                </p>
               </div>
             </div>
           </div>

@@ -21,6 +21,7 @@ import {
   CalendarClock,
   CalendarDays,
   Clock,
+  Grid3x3,
   Image as ImageIcon,
   PauseCircle,
   Pencil,
@@ -108,6 +109,12 @@ export function Sidebar({
           icon={CalendarClock}
           label="Overrides"
           active={isActive(`${base}/overrides`)}
+        />
+        <NavItem
+          href={`${base}/resources`}
+          icon={Grid3x3}
+          label="Stations"
+          active={isActive(`${base}/resources`)}
         />
         <NavItem href={`${base}/staff`} icon={Users} label="Staff" active={isActive(`${base}/staff`)} />
         <NavItem

@@ -41,6 +41,9 @@ def _make_world():
         WeekdayHours.objects.create(
             shop=shop, weekday=wd, is_closed=False, open_time=time(8, 0), close_time=time(20, 0)
         )
+    from apps.shops.models import Resource
+
+    Resource.objects.create(shop=shop, name="Station 1")
     service = Service.objects.create(
         shop=shop, name="Cut", duration_minutes=60, price=Decimal("500.00")
     )

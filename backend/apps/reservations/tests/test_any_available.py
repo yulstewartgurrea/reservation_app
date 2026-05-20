@@ -1,8 +1,10 @@
-"""Tests for "Any available" staff handling.
+"""Resource-based scheduling: capacity, conflicts, and the non-binding staff
+request.
 
-Covers the union availability across eligible staff, least-loaded
-auto-assignment at booking, eligibility filtering, and the staff-less
-fallback. See app_ideas.md §8 / README "Any available" notes.
+The binding scheduling unit is the Resource (bay / chair / room / slot). A shop
+with N Resources can take N concurrent bookings; staff is recorded only as an
+optional, non-binding request and never affects availability. See
+shops.Resource and app_ideas.md §8.17.
 """
 
 from datetime import datetime, time, timedelta
@@ -15,18 +17,19 @@ from rest_framework.test import APIClient
 
 from apps.core.test_factories import (
     make_customer,
+    make_resource,
     make_service,
     make_shop,
     make_staff,
 )
 from apps.reservations.availability import (
-    assign_least_loaded_staff,
+    assign_available_resource,
     compute_slots,
     compute_slots_any,
-    eligible_staff,
 )
+from apps.reservations.models import Reservation
 from apps.reservations.services import create_customer_reservation
-from apps.services.models import StaffService
+from apps.shops.models import Resource, TimeBlock
 
 User = get_user_model()
 
@@ -41,272 +44,218 @@ def _at(d, hour: int, minute: int = 0) -> datetime:
     )
 
 
-def _set_hours(staff, start: time, end: time):
-    staff.working_hours.update(start_time=start, end_time=end, is_off=False)
-
-
 def _starts(slots) -> set:
     return {s.start_at for s in slots}
 
 
-class UnionAvailabilityTests(TestCase):
+def _book(shop, service, start, **kw):
+    return create_customer_reservation(
+        customer=kw.pop("customer", None) or make_customer(),
+        shop=shop,
+        service=service,
+        start_at=start,
+        **kw,
+    )
+
+
+class ResourceCapacityTests(TestCase):
     def setUp(self):
-        self.shop = make_shop()
+        self.shop = make_shop(resources=2)  # two stations
         self.service = make_service(shop=self.shop, duration=60, buffer_=0)
-        self.alice = make_staff(shop=self.shop, name="Alice")
-        self.bob = make_staff(shop=self.shop, name="Bob")
         self.date = _future_date()
 
-    def test_union_keeps_slot_when_only_one_staff_is_booked(self):
-        """A booked Alice must not hide the 10:00 slot — Bob is still free.
-
-        This is the core fix vs. the old shop-level behaviour where any
-        single booking removed the slot for everyone.
-        """
-        create_customer_reservation(
-            customer=make_customer(),
-            shop=self.shop,
-            service=self.service,
-            staff=self.alice,
-            start_at=_at(self.date, 10),
-        )
-        union = _starts(compute_slots_any(self.shop, self.service, self.date))
-        alice_only = _starts(
-            compute_slots(self.shop, self.service, self.alice, self.date)
-        )
-        self.assertIn(_at(self.date, 10), union)
-        self.assertNotIn(_at(self.date, 10), alice_only)
-
-    def test_union_spans_combined_working_hours(self):
-        _set_hours(self.alice, time(8, 0), time(12, 0))
-        _set_hours(self.bob, time(14, 0), time(18, 0))
-        union = _starts(compute_slots_any(self.shop, self.service, self.date))
-        self.assertIn(_at(self.date, 8), union)  # Alice's window
-        self.assertIn(_at(self.date, 14), union)  # Bob's window
-        self.assertNotIn(_at(self.date, 13), union)  # neither works 13:00
-
-    def test_eligibility_restricts_union_to_configured_staff(self):
-        StaffService.objects.create(staff=self.alice, service=self.service)
-        create_customer_reservation(
-            customer=make_customer(),
-            shop=self.shop,
-            service=self.service,
-            staff=self.alice,
-            start_at=_at(self.date, 10),
-        )
-        union = _starts(compute_slots_any(self.shop, self.service, self.date))
-        # Only Alice is eligible and she is busy at 10:00 — Bob can't cover.
-        self.assertNotIn(_at(self.date, 10), union)
-        self.assertIn(_at(self.date, 9), union)  # Alice free at 09:00
-
-    def test_inactive_staff_is_excluded(self):
-        self.bob.is_active = False
-        self.bob.save(update_fields=["is_active"])
-        create_customer_reservation(
-            customer=make_customer(),
-            shop=self.shop,
-            service=self.service,
-            staff=self.alice,
-            start_at=_at(self.date, 10),
-        )
-        union = _starts(compute_slots_any(self.shop, self.service, self.date))
-        self.assertNotIn(_at(self.date, 10), union)  # inactive Bob can't cover
-
-    def test_staffless_shop_falls_back_to_shop_level(self):
-        shop = make_shop()
+    def test_single_resource_blocks_second_booking_same_time(self):
+        shop = make_shop(resources=1)
         service = make_service(shop=shop, duration=60)
-        union = compute_slots_any(shop, service, self.date)
-        shop_level = compute_slots(shop, service, None, self.date)
-        self.assertTrue(union)
-        self.assertEqual(_starts(union), _starts(shop_level))
+        _book(shop, service, _at(self.date, 10))
+        with self.assertRaises(ValidationError):
+            _book(shop, service, _at(self.date, 10))
 
-    def test_all_eligible_staff_off_returns_empty(self):
-        self.alice.working_hours.update(is_off=True)
-        self.bob.working_hours.update(is_off=True)
-        self.assertEqual(compute_slots_any(self.shop, self.service, self.date), [])
+    def test_two_resources_allow_two_concurrent_bookings(self):
+        r1 = _book(self.shop, self.service, _at(self.date, 10))
+        r2 = _book(self.shop, self.service, _at(self.date, 10))
+        self.assertNotEqual(r1.resource_id, r2.resource_id)
+        # Third at the same time has no free station -> rejected.
+        with self.assertRaises(ValidationError):
+            _book(self.shop, self.service, _at(self.date, 10))
 
-    def test_eligible_staff_helper_defaults_to_all_active(self):
-        self.assertEqual(
-            [s.id for s in eligible_staff(self.shop, self.service)],
-            sorted([self.alice.id, self.bob.id]),
+    def test_capacity_equals_resource_count(self):
+        shop = make_shop(resources=3)
+        service = make_service(shop=shop, duration=60)
+        used = set()
+        for _ in range(3):
+            used.add(_book(shop, service, _at(self.date, 10)).resource_id)
+        self.assertEqual(len(used), 3)  # three distinct stations
+        with self.assertRaises(ValidationError):
+            _book(shop, service, _at(self.date, 10))
+
+    def test_lowest_id_resource_assigned_first(self):
+        first = Resource.objects.filter(shop=self.shop).order_by("id").first()
+        r = _book(self.shop, self.service, _at(self.date, 10))
+        self.assertEqual(r.resource_id, first.id)
+
+    def test_cancelled_reservation_frees_the_resource(self):
+        shop = make_shop(resources=1)
+        service = make_service(shop=shop, duration=60)
+        r = _book(shop, service, _at(self.date, 10))
+        from apps.reservations.services import transition
+
+        transition(
+            reservation=r,
+            to_status=Reservation.Status.CANCELLED_BY_CUSTOMER,
+            actor=r.customer,
         )
-        StaffService.objects.create(staff=self.bob, service=self.service)
-        self.assertEqual(
-            [s.id for s in eligible_staff(self.shop, self.service)], [self.bob.id]
-        )
+        # The station is free again.
+        ok = _book(shop, service, _at(self.date, 10))
+        self.assertEqual(ok.resource_id, r.resource_id)
+
+    def test_buffer_extends_the_block_window_forward(self):
+        # buffer is added to the *creating* booking's block window (not stored
+        # in end_at). A booking at 10:00 (dur 60 + buffer 30) occupies the
+        # station to 11:30, so it must clash with an existing 11:00 booking.
+        shop = make_shop(resources=1)
+        service = make_service(shop=shop, duration=60, buffer_=30)
+        _book(shop, service, _at(self.date, 11))  # stored 11:00-12:00
+        with self.assertRaises(ValidationError):
+            _book(shop, service, _at(self.date, 10))  # window 10:00-11:30 clashes
+        # A booking ending its buffer before 11:00 is fine (9:00 -> 10:30).
+        ok = _book(shop, service, _at(self.date, 9))
+        self.assertIsNotNone(ok.id)
 
 
-class AutoAssignTests(TestCase):
+class StaffIsNonBindingTests(TestCase):
     def setUp(self):
-        self.shop = make_shop()
-        self.service = make_service(shop=self.shop, duration=60, buffer_=0)
-        self.alice = make_staff(shop=self.shop, name="Alice")
-        self.bob = make_staff(shop=self.shop, name="Bob")
+        self.shop = make_shop(resources=2)
+        self.service = make_service(shop=self.shop, duration=60)
+        self.juan = make_staff(shop=self.shop, name="Juan")
         self.date = _future_date()
-        self.customer = make_customer()
 
-    def test_book_any_assigns_a_concrete_staff(self):
-        r = create_customer_reservation(
-            customer=self.customer,
-            shop=self.shop,
-            service=self.service,
-            staff=None,
-            start_at=_at(self.date, 10),
-        )
-        self.assertIn(r.staff_id, {self.alice.id, self.bob.id})
+    def test_same_staff_on_two_overlapping_bookings_is_allowed(self):
+        r1 = _book(self.shop, self.service, _at(self.date, 10), staff=self.juan)
+        r2 = _book(self.shop, self.service, _at(self.date, 10), staff=self.juan)
+        # Both succeed (two stations) even though Juan is "requested" twice —
+        # staff never gates availability.
+        self.assertEqual(r1.staff_id, self.juan.id)
+        self.assertEqual(r2.staff_id, self.juan.id)
+        self.assertNotEqual(r1.resource_id, r2.resource_id)
 
-    def test_book_any_picks_least_loaded_staff(self):
-        # Alice already has two bookings that day; Bob has none.
-        for hour in (12, 14):
-            create_customer_reservation(
-                customer=make_customer(),
-                shop=self.shop,
-                service=self.service,
-                staff=self.alice,
-                start_at=_at(self.date, hour),
-            )
-        r = create_customer_reservation(
-            customer=self.customer,
-            shop=self.shop,
-            service=self.service,
-            staff=None,
-            start_at=_at(self.date, 10),
-        )
-        self.assertEqual(r.staff_id, self.bob.id)
+    def test_staff_request_is_recorded(self):
+        r = _book(self.shop, self.service, _at(self.date, 10), staff=self.juan)
+        self.assertEqual(r.staff_id, self.juan.id)
 
-    def test_tie_breaks_by_staff_id_when_load_equal(self):
-        assigned = assign_least_loaded_staff(
-            self.shop, self.service, _at(self.date, 10)
-        )
-        self.assertEqual(assigned.id, min(self.alice.id, self.bob.id))
-
-    def test_assigns_only_a_free_staff_even_if_more_loaded(self):
-        # Bob is busier overall but Alice is the one busy at 10:00,
-        # so the 10:00 booking must go to Bob (the only one free then).
-        create_customer_reservation(
-            customer=make_customer(),
-            shop=self.shop,
-            service=self.service,
-            staff=self.alice,
-            start_at=_at(self.date, 10),
-        )
-        for hour in (13, 15):
-            create_customer_reservation(
-                customer=make_customer(),
-                shop=self.shop,
-                service=self.service,
-                staff=self.bob,
-                start_at=_at(self.date, hour),
-            )
-        r = create_customer_reservation(
-            customer=self.customer,
-            shop=self.shop,
-            service=self.service,
-            staff=None,
-            start_at=_at(self.date, 10),
-        )
-        self.assertEqual(r.staff_id, self.bob.id)
-
-    def test_book_any_raises_when_all_eligible_staff_busy(self):
-        for staff in (self.alice, self.bob):
-            create_customer_reservation(
-                customer=make_customer(),
-                shop=self.shop,
-                service=self.service,
-                staff=staff,
-                start_at=_at(self.date, 10),
-            )
-        with self.assertRaises(ValidationError):
-            create_customer_reservation(
-                customer=self.customer,
-                shop=self.shop,
-                service=self.service,
-                staff=None,
-                start_at=_at(self.date, 10),
-            )
-
-    def test_specific_staff_path_is_unchanged(self):
-        create_customer_reservation(
-            customer=make_customer(),
-            shop=self.shop,
-            service=self.service,
-            staff=self.alice,
-            start_at=_at(self.date, 10),
-        )
-        with self.assertRaises(ValidationError):
-            create_customer_reservation(
-                customer=self.customer,
-                shop=self.shop,
-                service=self.service,
-                staff=self.alice,
-                start_at=_at(self.date, 10),
-            )
-        # A different staff at the same time is still fine.
-        ok = create_customer_reservation(
-            customer=self.customer,
-            shop=self.shop,
-            service=self.service,
-            staff=self.bob,
-            start_at=_at(self.date, 10),
-        )
-        self.assertEqual(ok.staff_id, self.bob.id)
-
-    def test_staffless_shop_books_null_staff_with_legacy_conflict(self):
-        shop = make_shop()
-        service = make_service(shop=shop, duration=60)
-        r = create_customer_reservation(
-            customer=self.customer,
-            shop=shop,
-            service=service,
-            staff=None,
-            start_at=_at(self.date, 10),
-        )
+    def test_booking_without_staff_request_works(self):
+        r = _book(self.shop, self.service, _at(self.date, 10))
         self.assertIsNone(r.staff_id)
-        with self.assertRaises(ValidationError):
-            create_customer_reservation(
-                customer=make_customer(),
-                shop=shop,
-                service=service,
-                staff=None,
-                start_at=_at(self.date, 10),
-            )
+        self.assertIsNotNone(r.resource_id)
 
-    def test_ineligible_staff_never_auto_assigned(self):
-        StaffService.objects.create(staff=self.alice, service=self.service)
-        # Only Alice eligible; she is booked at 10:00 → must raise, never
-        # silently assign the ineligible Bob.
-        create_customer_reservation(
-            customer=make_customer(),
+
+class TimeBlockTests(TestCase):
+    def setUp(self):
+        self.shop = make_shop(resources=2)
+        self.service = make_service(shop=self.shop, duration=60)
+        self.date = _future_date()
+        self.r1, self.r2 = Resource.objects.filter(shop=self.shop).order_by("id")
+
+    def test_block_on_one_resource_leaves_the_other_free(self):
+        TimeBlock.objects.create(
             shop=self.shop,
-            service=self.service,
-            staff=self.alice,
+            resource=self.r1,
             start_at=_at(self.date, 10),
+            end_at=_at(self.date, 11),
+        )
+        # r1 blocked at 10:00, so only r2 is bookable -> exactly one booking.
+        r = _book(self.shop, self.service, _at(self.date, 10))
+        self.assertEqual(r.resource_id, self.r2.id)
+        with self.assertRaises(ValidationError):
+            _book(self.shop, self.service, _at(self.date, 10))
+
+    def test_shopwide_block_removes_all_resources(self):
+        TimeBlock.objects.create(
+            shop=self.shop,
+            start_at=_at(self.date, 10),
+            end_at=_at(self.date, 11),
         )
         with self.assertRaises(ValidationError):
-            create_customer_reservation(
-                customer=self.customer,
-                shop=self.shop,
-                service=self.service,
-                staff=None,
-                start_at=_at(self.date, 10),
-            )
+            _book(self.shop, self.service, _at(self.date, 10))
+
+    def test_staff_only_block_is_non_binding(self):
+        staff = make_staff(shop=self.shop, name="Juan")
+        TimeBlock.objects.create(
+            shop=self.shop,
+            staff=staff,
+            start_at=_at(self.date, 10),
+            end_at=_at(self.date, 11),
+        )
+        # A staff-only block does not remove capacity.
+        r1 = _book(self.shop, self.service, _at(self.date, 10), staff=staff)
+        r2 = _book(self.shop, self.service, _at(self.date, 10))
+        self.assertNotEqual(r1.resource_id, r2.resource_id)
+
+
+class ComputeSlotsTests(TestCase):
+    def setUp(self):
+        self.shop = make_shop(resources=2)
+        self.service = make_service(shop=self.shop, duration=60, buffer_=0)
+        self.date = _future_date()
+
+    def test_slot_stays_until_all_resources_busy(self):
+        _book(self.shop, self.service, _at(self.date, 10))  # 1 of 2 used
+        self.assertIn(_at(self.date, 10), _starts(
+            compute_slots_any(self.shop, self.service, self.date)
+        ))
+        _book(self.shop, self.service, _at(self.date, 10))  # 2 of 2 used
+        self.assertNotIn(_at(self.date, 10), _starts(
+            compute_slots_any(self.shop, self.service, self.date)
+        ))
+
+    def test_per_resource_slots(self):
+        r1 = Resource.objects.filter(shop=self.shop).order_by("id").first()
+        _book(self.shop, self.service, _at(self.date, 10))  # takes r1 (lowest id)
+        r1_slots = _starts(compute_slots(self.shop, self.service, r1, self.date))
+        self.assertNotIn(_at(self.date, 10), r1_slots)
+
+    def test_no_active_resources_means_no_slots(self):
+        shop = make_shop(resources=0)
+        service = make_service(shop=shop, duration=60)
+        self.assertEqual(compute_slots_any(shop, service, self.date), [])
+
+
+class AssignAvailableResourceTests(TestCase):
+    def setUp(self):
+        self.shop = make_shop(resources=2)
+        self.service = make_service(shop=self.shop, duration=60)
+        self.date = _future_date()
+
+    def test_returns_lowest_id_free(self):
+        first = Resource.objects.filter(shop=self.shop).order_by("id").first()
+        got = assign_available_resource(self.shop, self.service, _at(self.date, 10))
+        self.assertEqual(got.id, first.id)
+
+    def test_returns_none_when_all_busy(self):
+        _book(self.shop, self.service, _at(self.date, 10))
+        _book(self.shop, self.service, _at(self.date, 10))
+        self.assertIsNone(
+            assign_available_resource(self.shop, self.service, _at(self.date, 10))
+        )
+
+    def test_inactive_resource_excluded(self):
+        extra = make_resource(shop=self.shop)
+        extra.is_active = False
+        extra.save(update_fields=["is_active"])
+        # 2 active stations -> 2 bookings, then full despite the inactive one.
+        _book(self.shop, self.service, _at(self.date, 10))
+        _book(self.shop, self.service, _at(self.date, 10))
+        with self.assertRaises(ValidationError):
+            _book(self.shop, self.service, _at(self.date, 10))
 
 
 class AvailabilityEndpointTests(TestCase):
     def setUp(self):
         self.client = APIClient()
-        self.shop = make_shop()
+        self.shop = make_shop(resources=1)
         self.service = make_service(shop=self.shop, duration=60, buffer_=0)
-        self.alice = make_staff(shop=self.shop, name="Alice")
-        self.bob = make_staff(shop=self.shop, name="Bob")
         self.date = _future_date()
-        create_customer_reservation(
-            customer=make_customer(),
-            shop=self.shop,
-            service=self.service,
-            staff=self.alice,
-            start_at=_at(self.date, 10),
-        )
+        _book(self.shop, self.service, _at(self.date, 10))  # fills the 1 station
 
     def _get(self, **params):
         params.setdefault("shop", self.shop.id)
@@ -314,19 +263,21 @@ class AvailabilityEndpointTests(TestCase):
         params.setdefault("date", self.date.isoformat())
         return self.client.get("/api/reservations/availability/", params)
 
-    def test_endpoint_without_staff_uses_union(self):
+    def test_full_resource_removes_slot(self):
         resp = self._get()
         self.assertEqual(resp.status_code, 200)
         starts = {row["start_at"] for row in resp.json()}
-        self.assertIn(_at(self.date, 10).isoformat(), starts)  # Bob covers
+        self.assertNotIn(_at(self.date, 10).isoformat(), starts)
 
-    def test_endpoint_with_staff_is_per_staff(self):
-        resp = self._get(staff=self.alice.id)
-        self.assertEqual(resp.status_code, 200)
+    def test_requested_staff_does_not_narrow_availability(self):
+        # A second station + a busy "requested" staff still shows 10:00.
+        make_resource(shop=self.shop)
+        staff = make_staff(shop=self.shop, name="Juan")
+        resp = self._get(staff=staff.id)
         starts = {row["start_at"] for row in resp.json()}
-        self.assertNotIn(_at(self.date, 10).isoformat(), starts)  # Alice busy
+        self.assertIn(_at(self.date, 10).isoformat(), starts)
 
-    def test_book_endpoint_any_sets_concrete_staff(self):
+    def test_book_endpoint_assigns_resource(self):
         customer = make_customer()
         self.client.force_authenticate(customer)
         resp = self.client.post(
@@ -334,10 +285,9 @@ class AvailabilityEndpointTests(TestCase):
             {
                 "shop": self.shop.id,
                 "service": self.service.id,
-                "staff": None,
                 "start_at": _at(self.date, 11).isoformat(),
             },
             format="json",
         )
         self.assertEqual(resp.status_code, 201, resp.content)
-        self.assertIsNotNone(resp.json()["staff"])
+        self.assertIsNotNone(resp.json()["resource"])
