@@ -13,7 +13,7 @@ A multi-shop service reservation platform (haircuts, spas, car wash, repair, etc
 - **Backend:** Django 5 + DRF + Channels + Celery + Beat + Redis + PostgreSQL — `backend/`
 - **Frontend:** Next.js 15 (App Router) + Tailwind + TanStack Query + Zustand — `frontend/`
 - **Payments:** PayMongo (PHP-only). **Never Stripe.**
-- **Infra:** Docker Compose — 7 services (db, redis, web, worker, beat, frontend)
+- **Infra:** Docker Compose — 5 backend services (db, redis, web, worker, beat). The frontend is **not** containerized: run it on the host with `cd frontend && npm run dev`. Prod is a static export to S3/CloudFront.
 
 ## Working agreements
 
@@ -69,7 +69,7 @@ For local dev without a PayMongo sandbox account, leave `PAYMONGO_SECRET_KEY` em
 
 When the user says "pls continue":
 1. Open with a `TodoWrite` listing 5–10 concrete tasks.
-2. Pick from the deferred list at the bottom of [README.md](README.md) — current top of queue: deposits / partial payment, customer-initiated refund flow, SMS reminders (Twilio), settling commission entries from admin UI.
+2. Pick from the deferred list at the bottom of [README.md](README.md) — current top of queue: deposits / partial payment, customer-initiated refund flow, SMS reminders (Twilio). (Monthly commission invoicing + collection is done — see app_ideas.md §8.3.1.)
 3. Each round ships feature + tests + doc updates (README and/or app_ideas.md).
 4. End with a 1-paragraph summary and a one-line offer to continue with a specific next item.
 
