@@ -15,6 +15,7 @@ type Reservation = {
   shop_name: string;
   service_name: string;
   start_at: string;
+  quantity: number;
 };
 
 export default function ReschedulePage() {
@@ -35,7 +36,10 @@ export default function ReschedulePage() {
     setSubmitting(true);
     setError(null);
     try {
-      await api.post(`/reservations/${id}/reschedule/`, { start_at: chosen });
+      await api.post(`/reservations/${id}/reschedule/`, {
+        start_at: chosen,
+        quantity: reservation?.quantity ?? 1,
+      });
       router.push("/reservations");
     } catch (err) {
       setError(formatApiError(err));
@@ -62,6 +66,7 @@ export default function ReschedulePage() {
         shopId={reservation.shop}
         serviceId={reservation.service}
         staffId={reservation.staff}
+        quantity={reservation.quantity ?? 1}
         chosen={chosen}
         onChosen={setChosen}
       />

@@ -10,12 +10,14 @@ from rest_framework.response import Response
 from apps.accounts.permissions import IsShopOwner
 from apps.shops.models import Shop
 
-from .models import Service, ServiceCategory, ServicePhoto
+from .models import Service, ServiceCategory, ServicePhoto, ServicePriceHistory
 from .serializers import (
     ServiceCategorySerializer,
     ServicePhotoSerializer,
+    ServicePriceHistorySerializer,
     ServiceSerializer,
 )
+from .services import update_service
 
 
 class ServicePagination(PageNumberPagination):
@@ -52,6 +54,11 @@ class ServiceViewSet(viewsets.ModelViewSet):
         # POST is enforced as owner-only inside the handler.
         if self.action == "photos" and self.request.method == "GET":
             return [permissions.AllowAny()]
+        # price-history is owner-OR-admin; the owner-vs-admin scoping (own
+        # services only for owners, any for admin) is enforced inside the
+        # handler via `_can_view_price_history`, so just require auth here.
+        if self.action == "price_history":
+            return [permissions.IsAuthenticated()]
         return [IsShopOwner()]
 
     def get_queryset(self):
@@ -83,6 +90,37 @@ class ServiceViewSet(viewsets.ModelViewSet):
         if shop.owner_id != self.request.user.id:
             raise PermissionDenied("You can only add services to your own shop.")
         serializer.save()
+
+    def perform_update(self, serializer):
+        """Route updates through the service layer so a price change is
+        recorded in ServicePriceHistory atomically (no inline save, no signal).
+        """
+        update_service(
+            service=serializer.instance,
+            validated_data=serializer.validated_data,
+            changed_by=self.request.user,
+        )
+
+    @action(detail=True, methods=["get"], url_path="price-history")
+    def price_history(self, request, pk=None):
+        """Read-only price-change audit trail for one service.
+
+        Owner may view their OWN services' history; admin may view any.
+        The owner-vs-admin scoping is enforced by `_can_view_price_history`.
+        """
+        service = self.get_object()
+        if not self._can_view_price_history(request.user, service):
+            return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
+        qs = service.price_history.select_related("changed_by").all()
+        return Response(ServicePriceHistorySerializer(qs, many=True).data)
+
+    @staticmethod
+    def _can_view_price_history(user, service) -> bool:
+        if not (user and user.is_authenticated):
+            return False
+        if user.role == "admin" or user.is_superuser:
+            return True
+        return service.shop.owner_id == user.id
 
     @action(
         detail=True,

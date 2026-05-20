@@ -1,6 +1,6 @@
 from rest_framework import serializers
 
-from .models import Service, ServiceCategory, ServicePhoto
+from .models import Service, ServiceCategory, ServicePhoto, ServicePriceHistory
 
 
 class ServiceCategorySerializer(serializers.ModelSerializer):
@@ -14,6 +14,29 @@ class ServicePhotoSerializer(serializers.ModelSerializer):
         model = ServicePhoto
         fields = ("id", "image", "caption", "sort_order", "is_primary")
         read_only_fields = ("is_primary",)
+
+
+class ServicePriceHistorySerializer(serializers.ModelSerializer):
+    changed_by_name = serializers.SerializerMethodField()
+
+    class Meta:
+        model = ServicePriceHistory
+        fields = (
+            "id",
+            "service",
+            "old_price",
+            "new_price",
+            "changed_by",
+            "changed_by_name",
+            "created_at",
+        )
+        read_only_fields = fields
+
+    def get_changed_by_name(self, obj) -> str | None:
+        if not obj.changed_by_id:
+            return None
+        u = obj.changed_by
+        return f"{u.first_name} {u.last_name}".strip() or u.username or u.email
 
 
 class ServiceSerializer(serializers.ModelSerializer):
@@ -33,6 +56,9 @@ class ServiceSerializer(serializers.ModelSerializer):
             "duration_minutes",
             "buffer_minutes",
             "price",
+            "max_quantity",
+            "unit_label",
+            "inter_unit_buffer_minutes",
             "cover_photo",
             "gallery",
             "is_active",

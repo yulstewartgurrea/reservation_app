@@ -12,6 +12,8 @@ type Props = {
   staffId?: number | null;
   /** ISO date string YYYY-MM-DD; if omitted, uses today and exposes a date picker. */
   date?: string;
+  /** Number of units booked — scales the required block. Defaults to 1. */
+  quantity?: number;
   onChosen: (startAt: string | null) => void;
   chosen: string | null;
 };
@@ -24,7 +26,15 @@ type Props = {
  * Self-contained so booking and reschedule pages don't reimplement the same
  * fetch/loading/render pattern.
  */
-export function SlotPicker({ shopId, serviceId, staffId, date, onChosen, chosen }: Props) {
+export function SlotPicker({
+  shopId,
+  serviceId,
+  staffId,
+  date,
+  quantity = 1,
+  onChosen,
+  chosen,
+}: Props) {
   const [internalDate, setInternalDate] = useState(() => date ?? todayIso());
   const [slots, setSlots] = useState<Slot[]>([]);
   const [loading, setLoading] = useState(false);
@@ -38,11 +48,12 @@ export function SlotPicker({ shopId, serviceId, staffId, date, onChosen, chosen 
           service: serviceId,
           staff: staffId ?? undefined,
           date: internalDate,
+          quantity,
         },
       })
       .then((r) => setSlots(r.data))
       .finally(() => setLoading(false));
-  }, [shopId, serviceId, staffId, internalDate]);
+  }, [shopId, serviceId, staffId, internalDate, quantity]);
 
   return (
     <div className="space-y-3">

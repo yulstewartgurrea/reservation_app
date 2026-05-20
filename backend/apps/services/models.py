@@ -1,3 +1,4 @@
+from django.conf import settings
 from django.db import models
 
 
@@ -23,6 +24,19 @@ class Service(models.Model):
     duration_minutes = models.PositiveIntegerField()
     buffer_minutes = models.PositiveIntegerField(default=0, help_text="Padding after the service.")
     price = models.DecimalField(max_digits=10, decimal_places=2)
+    max_quantity = models.PositiveIntegerField(
+        default=1,
+        help_text="Max units a customer can book in one reservation. 1 = quantity not offered.",
+    )
+    unit_label = models.CharField(max_length=20, default="unit")
+    inter_unit_buffer_minutes = models.PositiveIntegerField(
+        default=0,
+        help_text=(
+            "Gap between units for multi-unit bookings (e.g. travel/reset "
+            "between each aircon). Not applied for single-unit bookings or "
+            "after the last unit."
+        ),
+    )
     is_active = models.BooleanField(default=True)
 
     eligible_staff = models.ManyToManyField(
@@ -44,6 +58,36 @@ class Service(models.Model):
     @property
     def total_block_minutes(self) -> int:
         return self.duration_minutes + self.buffer_minutes
+
+
+class ServicePriceHistory(models.Model):
+    """Append-only audit trail of every Service.price change.
+
+    Written by `apps.services.services.update_service` (service layer, not a
+    signal) whenever the persisted price actually changes. Existing bookings
+    are unaffected because each Reservation snapshots its own `unit_price`;
+    this table is the human-facing record of *what changed, when, by whom*.
+    """
+
+    service = models.ForeignKey(
+        Service, on_delete=models.CASCADE, related_name="price_history"
+    )
+    old_price = models.DecimalField(max_digits=10, decimal_places=2)
+    new_price = models.DecimalField(max_digits=10, decimal_places=2)
+    changed_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="service_price_changes",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        ordering = ["-created_at"]
+
+    def __str__(self) -> str:
+        return f"{self.service.name}: {self.old_price} → {self.new_price}"
 
 
 class StaffService(models.Model):

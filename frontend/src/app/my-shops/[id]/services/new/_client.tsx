@@ -50,6 +50,9 @@ type FormValues = {
   buffer_minutes: string;
   price: string;
   category: string;
+  max_quantity: string;
+  unit_label: string;
+  inter_unit_buffer_minutes: string;
   is_active: boolean;
 };
 
@@ -67,6 +70,9 @@ function emptyForm(): FormValues {
     buffer_minutes: "0",
     price: "0",
     category: "",
+    max_quantity: "1",
+    unit_label: "unit",
+    inter_unit_buffer_minutes: "0",
     is_active: true,
   };
 }
@@ -150,6 +156,12 @@ export default function NewServicePage() {
         buffer_minutes: Number(form.buffer_minutes),
         price: form.price,
         category: form.category ? Number(form.category) : null,
+        max_quantity: Math.max(1, Number(form.max_quantity) || 1),
+        unit_label: form.unit_label.trim() || "unit",
+        inter_unit_buffer_minutes: Math.max(
+          0,
+          Number(form.inter_unit_buffer_minutes) || 0
+        ),
         is_active: form.is_active,
       };
       const { data: created } = await api.post(`/services/`, payload);
@@ -290,6 +302,48 @@ export default function NewServicePage() {
                   value: String(m),
                   label: m === 0 ? "No buffer" : `${m} min`,
                 }))}
+              />
+            </Field>
+          </div>
+
+          <div className="grid gap-5 sm:grid-cols-2">
+            <Field
+              label="Max quantity per booking"
+              tooltip="Max units a customer can book in one reservation; 1 hides the quantity selector. Time and price scale with quantity."
+            >
+              <input
+                type="number"
+                min={1}
+                value={form.max_quantity}
+                onChange={(e) => update("max_quantity", e.target.value)}
+                className="w-full rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              />
+            </Field>
+            <Field
+              label="Unit label"
+              tooltip='What one unit is called, e.g. "person", "seat", "table". Pluralized automatically.'
+            >
+              <input
+                type="text"
+                value={form.unit_label}
+                maxLength={20}
+                onChange={(e) => update("unit_label", e.target.value)}
+                placeholder="unit"
+                className="w-full rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+              />
+            </Field>
+            <Field
+              label="Gap between units (min)"
+              tooltip="Extra minutes between each unit for multi-unit bookings (e.g. moving between aircon units). Not applied for single-unit bookings."
+            >
+              <input
+                type="number"
+                min={0}
+                value={form.inter_unit_buffer_minutes}
+                onChange={(e) =>
+                  update("inter_unit_buffer_minutes", e.target.value)
+                }
+                className="w-full rounded-lg border border-slate-300 px-3.5 py-2.5 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
               />
             </Field>
           </div>

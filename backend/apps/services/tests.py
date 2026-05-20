@@ -1,14 +1,21 @@
 """Tests for the ServicePhoto endpoints + cover_photo serializer field +
 service list/stats endpoints used by the shop owner dashboard."""
 
+from decimal import Decimal
 from io import BytesIO
 
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.test import TestCase
 from rest_framework.test import APIClient
 
-from apps.core.test_factories import make_service, make_shop, make_shop_owner
-from apps.services.models import Service, ServicePhoto
+from apps.core.test_factories import (
+    make_admin,
+    make_service,
+    make_shop,
+    make_shop_owner,
+)
+from apps.services.models import Service, ServicePhoto, ServicePriceHistory
+from apps.services.services import update_service
 
 
 def _fake_image(name: str = "test.png") -> SimpleUploadedFile:
@@ -287,3 +294,86 @@ class ServiceListAndStatsTests(TestCase):
         self.assertEqual(response.status_code, 200)
         names = [s["name"] for s in response.json()["results"]]
         self.assertEqual(names, ["Deep tissue massage"])
+
+
+class ServicePriceHistoryTests(TestCase):
+    """update_service records a ServicePriceHistory row only when the
+    persisted price actually changes."""
+
+    def setUp(self):
+        self.owner = make_shop_owner()
+        self.shop = make_shop(owner=self.owner)
+        self.service = make_service(shop=self.shop, price="500.00")
+
+    def test_price_change_records_one_history_row(self):
+        update_service(
+            service=self.service,
+            validated_data={"price": Decimal("750.00")},
+            changed_by=self.owner,
+        )
+        rows = ServicePriceHistory.objects.filter(service=self.service)
+        self.assertEqual(rows.count(), 1)
+        row = rows.first()
+        self.assertEqual(row.old_price, Decimal("500.00"))
+        self.assertEqual(row.new_price, Decimal("750.00"))
+        self.assertEqual(row.changed_by, self.owner)
+
+    def test_update_without_price_change_records_nothing(self):
+        update_service(
+            service=self.service,
+            validated_data={"name": "Renamed", "price": Decimal("500.00")},
+            changed_by=self.owner,
+        )
+        self.assertFalse(
+            ServicePriceHistory.objects.filter(service=self.service).exists()
+        )
+        self.service.refresh_from_db()
+        self.assertEqual(self.service.name, "Renamed")
+
+    def test_patch_endpoint_routes_through_service_layer(self):
+        client = APIClient()
+        client.force_authenticate(self.owner)
+        response = client.patch(
+            f"/api/services/{self.service.id}/",
+            {"price": "900.00"},
+            format="json",
+        )
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(
+            ServicePriceHistory.objects.filter(service=self.service).count(), 1
+        )
+
+
+class ServicePriceHistoryPermissionTests(TestCase):
+    def setUp(self):
+        self.client = APIClient()
+        self.owner_a = make_shop_owner()
+        self.shop_a = make_shop(owner=self.owner_a)
+        self.service_a = make_service(shop=self.shop_a, price="500.00")
+        update_service(
+            service=self.service_a,
+            validated_data={"price": Decimal("600.00")},
+            changed_by=self.owner_a,
+        )
+
+        self.owner_b = make_shop_owner()
+
+    def _url(self):
+        return f"/api/services/{self.service_a.id}/price-history/"
+
+    def test_owner_can_view_own_service_history(self):
+        self.client.force_authenticate(self.owner_a)
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(len(response.json()), 1)
+
+    def test_other_owner_cannot_view_history(self):
+        self.client.force_authenticate(self.owner_b)
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, 403)
+
+    def test_admin_can_view_any_history(self):
+        self.client.force_authenticate(make_admin())
+        response = self.client.get(self._url())
+        self.assertEqual(response.status_code, 200, response.content)
+        self.assertEqual(len(response.json()), 1)
