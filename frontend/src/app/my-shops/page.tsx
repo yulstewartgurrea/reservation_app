@@ -72,12 +72,14 @@ function MyShopsPageInner() {
             </p>
           )}
         </div>
-        <Link
-          href="/my-shops/new"
-          className="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
-        >
-          + New shop
-        </Link>
+        <div className="flex items-center gap-2">
+          <Link
+            href="/my-shops/new"
+            className="rounded-md bg-brand-600 px-4 py-2 text-sm font-medium text-white hover:bg-brand-700"
+          >
+            + New shop
+          </Link>
+        </div>
       </div>
 
       {error && (

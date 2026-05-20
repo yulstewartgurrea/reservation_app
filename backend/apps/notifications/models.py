@@ -11,6 +11,9 @@ class Notification(models.Model):
         BOOKING_NO_SHOW = "booking_no_show", "Marked no-show"
         REMINDER = "reminder", "Reminder"
         CHAT_NEW_MESSAGE = "chat.new_message", "New chat message"
+        COMMISSION_INVOICE_ISSUED = "commission_invoice_issued", "Commission invoice issued"
+        COMMISSION_INVOICE_PAID = "commission_invoice_paid", "Commission invoice paid"
+        COMMISSION_INVOICE_OVERDUE = "commission_invoice_overdue", "Commission invoice overdue"
 
     user = models.ForeignKey(
         settings.AUTH_USER_MODEL,

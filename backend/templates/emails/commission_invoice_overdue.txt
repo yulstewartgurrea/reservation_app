@@ -1,0 +1,14 @@
+Hi {{ owner_name }},
+
+The {{ period }} commission invoice for {{ shop.name }} is past its due date.
+{% if paused %}New bookings for this shop have been paused until the invoice is paid.{% else %}Please settle it soon to avoid new bookings being paused.{% endif %}
+
+Shop: {{ shop.name }}
+Period: {{ period }}
+Due date: {{ due_date|date:"l, F j, Y" }}
+
+Amount due: PHP {{ amount }}
+
+Pay now: {{ frontend_url }}/owner/billing
+
+— BookMe

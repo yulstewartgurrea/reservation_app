@@ -5,8 +5,16 @@ from django.db.models import Sum
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.response import Response
 
+from rest_framework import status
+
 from apps.accounts.permissions import IsAdmin
-from apps.reservations.models import CommissionLedger, Reservation
+from apps.reservations.commission_billing import (
+    generate_monthly_invoices,
+    mark_invoice_paid,
+    void_invoice,
+)
+from apps.reservations.models import CommissionInvoice, CommissionLedger, Reservation
+from apps.reservations.serializers import CommissionInvoiceSerializer
 from apps.shops.models import Shop
 from apps.shops.serializers import ShopDetailSerializer
 
@@ -118,3 +126,77 @@ def commission_ledger(request):
         reverse=True,
     )
     return Response({"rows": rows, "by_shop": summary})
+
+
+@api_view(["GET"])
+@permission_classes([IsAdmin])
+def commission_invoices(request):
+    """List commission invoices, filterable by status / shop / period."""
+    qs = CommissionInvoice.objects.select_related("shop").all()
+    if (status_f := request.query_params.get("status")):
+        qs = qs.filter(status=status_f)
+    if (shop_f := request.query_params.get("shop")):
+        qs = qs.filter(shop_id=shop_f)
+    if (period_f := request.query_params.get("period")):
+        qs = qs.filter(period=period_f)
+
+    rows = CommissionInvoiceSerializer(qs[:500], many=True).data
+    outstanding = float(
+        sum(
+            inv.amount
+            for inv in qs.filter(status=CommissionInvoice.Status.OPEN)
+        )
+        or Decimal("0")
+    )
+    return Response({"rows": rows, "outstanding": outstanding})
+
+
+@api_view(["POST"])
+@permission_classes([IsAdmin])
+def generate_commission_invoices(request):
+    """Manually trigger monthly invoice generation. Optional `period` in body
+    (defaults to previous calendar month). Idempotent."""
+    period = request.data.get("period") or None
+    invoices = generate_monthly_invoices(period)
+    return Response(
+        {
+            "generated": len(invoices),
+            "rows": CommissionInvoiceSerializer(invoices, many=True).data,
+        }
+    )
+
+
+@api_view(["POST"])
+@permission_classes([IsAdmin])
+def settle_commission_invoice(request, invoice_id: int):
+    """Mark an invoice paid offline (bank / GCash)."""
+    try:
+        invoice = CommissionInvoice.objects.select_related("shop").get(pk=invoice_id)
+    except CommissionInvoice.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+    try:
+        mark_invoice_paid(
+            invoice,
+            raw={"settled_by_admin": request.user.id},
+            settled_offline=True,
+            actor=request.user,
+        )
+    except ValueError as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(CommissionInvoiceSerializer(invoice).data)
+
+
+@api_view(["POST"])
+@permission_classes([IsAdmin])
+def void_commission_invoice(request, invoice_id: int):
+    try:
+        invoice = CommissionInvoice.objects.select_related("shop").get(pk=invoice_id)
+    except CommissionInvoice.DoesNotExist:
+        return Response({"detail": "Not found."}, status=404)
+    try:
+        void_invoice(
+            invoice, actor=request.user, reason=request.data.get("reason", "")
+        )
+    except ValueError as exc:
+        return Response({"detail": str(exc)}, status=status.HTTP_400_BAD_REQUEST)
+    return Response(CommissionInvoiceSerializer(invoice).data)

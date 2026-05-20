@@ -1,15 +1,18 @@
 from pathlib import Path
 from datetime import timedelta
 import environ
+from celery.schedules import crontab
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 
 env = environ.Env(
     DJANGO_DEBUG=(bool, False),
-    DEFAULT_COMMISSION_RATE=(float, 0.10),
+    DEFAULT_COMMISSION_RATE=(float, 0.15),
     DEFAULT_CANCELLATION_WINDOW_HOURS=(int, 24),
     STRIKE_LIMIT=(int, 3),
     STRIKE_WINDOW_DAYS=(int, 90),
+    COMMISSION_INVOICE_DUE_DAYS=(int, 7),
+    COMMISSION_INVOICE_GRACE_DAYS=(int, 7),
 )
 environ.Env.read_env(BASE_DIR / ".env")
 
@@ -225,6 +228,16 @@ CELERY_BEAT_SCHEDULE = {
         "task": "apps.reservations.tasks.dispatch_due_reminders",
         "schedule": 600.0,  # every 10 min; < REMINDER_LATE_GRACE so none are missed
     },
+    "generate-monthly-commission-invoices": {
+        "task": "apps.reservations.tasks.generate_monthly_commission_invoices",
+        # 1st of each month, 02:00 UTC — bills the *previous* calendar month.
+        "schedule": crontab(day_of_month=1, hour=2, minute=0),
+    },
+    "process-overdue-commission-invoices": {
+        "task": "apps.reservations.tasks.process_overdue_commission_invoices",
+        # Daily 03:00 UTC: escalating reminders + auto-pause after grace.
+        "schedule": crontab(hour=3, minute=0),
+    },
 }
 
 EMAIL_BACKEND = env("EMAIL_BACKEND", default="django.core.mail.backends.console.EmailBackend")
@@ -252,6 +265,11 @@ DEFAULT_COMMISSION_RATE = env("DEFAULT_COMMISSION_RATE")
 DEFAULT_CANCELLATION_WINDOW_HOURS = env("DEFAULT_CANCELLATION_WINDOW_HOURS")
 STRIKE_LIMIT = env("STRIKE_LIMIT")
 STRIKE_WINDOW_DAYS = env("STRIKE_WINDOW_DAYS")
+
+# Monthly commission invoicing: days from issue to due, then a grace period
+# after due before the shop's new bookings are auto-paused until paid.
+COMMISSION_INVOICE_DUE_DAYS = env("COMMISSION_INVOICE_DUE_DAYS")
+COMMISSION_INVOICE_GRACE_DAYS = env("COMMISSION_INVOICE_GRACE_DAYS")
 
 PAYMONGO_SECRET_KEY = env("PAYMONGO_SECRET_KEY", default="")
 PAYMONGO_PUBLIC_KEY = env("PAYMONGO_PUBLIC_KEY", default="")

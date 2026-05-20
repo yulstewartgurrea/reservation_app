@@ -1,0 +1,38 @@
+{% extends "emails/_base.html" %}
+{% block title %}Invoice overdue &middot; BookMe{% endblock %}
+{% block preheader %}Action needed: your {{ period }} commission invoice for {{ shop.name }} is overdue.{% endblock %}
+{% block content %}
+  <div style="text-align:center;margin:0 0 18px 0;">
+    <span style="display:inline-block;background:#fee2e2;color:#b91c1c;font-size:12px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;padding:5px 12px;border-radius:999px;">Overdue</span>
+  </div>
+
+  <h1 style="margin:0 0 8px 0;font-size:24px;font-weight:700;color:#0f172a;text-align:center;letter-spacing:-0.01em;">Commission invoice overdue</h1>
+  <p style="margin:0 0 24px 0;font-size:15px;line-height:1.6;color:#475569;text-align:center;">
+    Hi {{ owner_name }}, the {{ period }} commission invoice for <strong style="color:#0f172a;">{{ shop.name }}</strong> is past its due date.
+    {% if paused %}New bookings for this shop have been paused until the invoice is paid.{% else %}Please settle it soon to avoid new bookings being paused.{% endif %}
+  </p>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 24px 0;background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;">
+    <tr>
+      <td style="padding:18px 22px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+          <tr><td style="padding:6px 0;font-size:13px;color:#64748b;width:40%;">Shop</td><td style="padding:6px 0;font-size:14px;color:#0f172a;font-weight:600;">{{ shop.name }}</td></tr>
+          <tr><td style="padding:6px 0;font-size:13px;color:#64748b;">Period</td><td style="padding:6px 0;font-size:14px;color:#0f172a;">{{ period }}</td></tr>
+          <tr><td style="padding:6px 0;font-size:13px;color:#64748b;">Due date</td><td style="padding:6px 0;font-size:14px;color:#0f172a;">{{ due_date|date:"l, F j, Y" }}</td></tr>
+          <tr><td colspan="2" style="padding:10px 0 4px 0;"><div style="border-top:1px solid #e2e8f0;"></div></td></tr>
+          <tr><td style="padding:6px 0;font-size:14px;color:#0f172a;font-weight:600;">Amount due</td><td style="padding:6px 0;font-size:16px;color:#0f172a;font-weight:700;">&#8369;{{ amount }}</td></tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 8px 0;">
+    <tr>
+      <td align="center">
+        <a href="{{ frontend_url }}/owner/billing" style="display:inline-block;background:#4f46e5;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;padding:13px 28px;border-radius:10px;line-height:1.2;">
+          Pay now
+        </a>
+      </td>
+    </tr>
+  </table>
+{% endblock %}

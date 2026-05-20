@@ -247,3 +247,24 @@ def decay_strikes() -> str:
     now = timezone.now()
     cleared = User.objects.filter(restricted_until__lt=now).update(restricted_until=None)
     return f"strike decay: cleared {cleared} restrictions"
+
+
+@shared_task
+def generate_monthly_commission_invoices(period: str | None = None) -> str:
+    """Beat task (1st of month, 02:00 UTC): issue one commission invoice per
+    shop with unsettled commission for the previous calendar month. Idempotent.
+    """
+    from .commission_billing import generate_monthly_invoices
+
+    invoices = generate_monthly_invoices(period)
+    return f"commission invoices generated/refreshed: {len(invoices)}"
+
+
+@shared_task
+def process_overdue_commission_invoices() -> str:
+    """Beat task (daily, 03:00 UTC): escalating reminders for overdue invoices
+    and auto-pause shops once past the grace period."""
+    from .commission_billing import process_overdue_invoices
+
+    result = process_overdue_invoices()
+    return f"overdue commission scan: reminded={result['reminded']} paused={result['paused']}"

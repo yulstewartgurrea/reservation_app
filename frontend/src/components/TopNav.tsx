@@ -38,9 +38,20 @@ export function TopNav() {
           {user ? (
             <>
               {user.role === "shop_owner" && (
-                <Link href="/my-shops" className="rounded px-3 py-2 hover:bg-slate-100">
-                  My shops
-                </Link>
+                <>
+                  <Link
+                    href="/my-shops"
+                    className="rounded px-3 py-2 hover:bg-slate-100"
+                  >
+                    My shops
+                  </Link>
+                  <Link
+                    href="/owner/billing"
+                    className="rounded px-3 py-2 hover:bg-slate-100"
+                  >
+                    Billing
+                  </Link>
+                </>
               )}
               {user.role === "admin" && (
                 <Link href="/admin" className="rounded px-3 py-2 hover:bg-slate-100">

@@ -1,0 +1,17 @@
+Hi {{ owner_name }},
+
+Here's the platform commission owed for online bookings completed at
+{{ shop.name }} during {{ period }}.
+
+Shop: {{ shop.name }}
+Period: {{ period }}
+Due date: {{ due_date|date:"l, F j, Y" }}
+
+Amount due: PHP {{ amount }}
+
+View & pay your invoice: {{ frontend_url }}/owner/billing
+
+Please settle this invoice by the due date. Unpaid invoices may pause new
+bookings for your shop after a short grace period.
+
+— BookMe

@@ -18,6 +18,7 @@ import {
 } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatApiError } from "@/lib/errors";
+import { SERVICE_FEE_TERMS } from "@/lib/billing";
 import { FormField as Field, FormSection as Section } from "@/components/FormSection";
 import { LocationMap, geocodeAddress } from "@/components/LocationMap";
 import { SidebarCard } from "@/components/SidebarCard";
@@ -493,6 +494,17 @@ export default function NewShopPage() {
             ]}
           />
         </aside>
+      </div>
+
+      {/* SERVICE-FEE NOTICE — non-dismissable; shown before submit */}
+      <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+        <p className="font-semibold">Service fee &amp; billing</p>
+        <p className="mt-1">{SERVICE_FEE_TERMS}</p>
+        <p className="mt-1 text-amber-800">
+          By creating a shop you agree to these billing terms. You can review
+          invoices anytime under{" "}
+          <span className="font-medium">Billing</span>.
+        </p>
       </div>
 
       {/* STICKY BOTTOM BAR */}

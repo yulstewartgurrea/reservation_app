@@ -70,6 +70,23 @@ export function nowDatetimeLocal(): string {
   );
 }
 
+/**
+ * Format a PHP money amount with the ₱ sign and 2 decimals.
+ *
+ * Amounts come from the API as decimal strings (e.g. "1234.50") or numbers.
+ * Currency is PHP-only platform-wide (PayMongo limitation), so this is the
+ * single place that owns ₱ formatting — don't inline `toLocaleString` for
+ * money elsewhere.
+ */
+export function formatPhp(amount: string | number | null | undefined): string {
+  const n = typeof amount === "string" ? parseFloat(amount) : amount ?? 0;
+  if (n == null || Number.isNaN(n)) return "₱0.00";
+  return `₱${n.toLocaleString("en-PH", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })}`;
+}
+
 export function formatRsv(id: number | string): string {
   const n = typeof id === "string" ? parseInt(id, 10) : id;
   if (Number.isNaN(n)) return String(id);
