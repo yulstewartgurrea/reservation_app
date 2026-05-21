@@ -146,6 +146,7 @@ All in `backend/.env` (mirrors `backend/.env.example`).
 | `CELERY_BROKER_URL` | `redis://redis:6379/1` | Celery broker |
 | `CELERY_RESULT_BACKEND` | `redis://redis:6379/2` | Celery results |
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:3000` | Comma-separated origins |
+| `DRF_NUM_PROXIES` | (unset) | Trusted proxy count in front of the app, for IP-based rate limiting on `login`/`register`/`password/reset`. Behind CloudFront→ALB→ECS set this so the throttle keys on the real client IP from `X-Forwarded-For` instead of the proxy's; unset lets DRF use the first XFF entry. |
 | `FRONTEND_URL` | `http://localhost:3000` | Used to build absolute links inside emails |
 | `DEFAULT_COMMISSION_RATE` | `0.15` | Platform fallback rate; override per-shop with `Shop.commission_rate` (e.g. `0` for an intro period) |
 | `DEFAULT_CANCELLATION_WINDOW_HOURS` | `24` | Hours-before-start cutoff for free cancel |

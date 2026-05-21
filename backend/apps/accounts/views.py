@@ -1,13 +1,15 @@
 from django.contrib.auth import get_user_model
 from django.utils import timezone
 from rest_framework import generics, permissions, status
-from rest_framework.decorators import api_view, permission_classes
+from rest_framework.decorators import api_view, permission_classes, throttle_classes
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
+from rest_framework_simplejwt.views import TokenObtainPairView
 
 from .emails import send_otp_email, send_password_reset_email, send_verification_email
 from .otp import issue_otp, verify_otp
 from .serializers import RegisterSerializer, UserSerializer
+from .throttles import LoginRateThrottle, PasswordResetRateThrottle, RegisterRateThrottle
 from .tokens import (
     consume_email_token,
     consume_reset_token,
@@ -32,9 +34,16 @@ def _issue_jwt_for(user) -> dict:
     return {"access": str(refresh.access_token), "refresh": str(refresh)}
 
 
+class ThrottledTokenObtainPairView(TokenObtainPairView):
+    """Login endpoint with per-IP rate limiting to blunt credential stuffing."""
+
+    throttle_classes = [LoginRateThrottle]
+
+
 class RegisterView(generics.CreateAPIView):
     serializer_class = RegisterSerializer
     permission_classes = [permissions.AllowAny]
+    throttle_classes = [RegisterRateThrottle]
 
     def perform_create(self, serializer):
         user = serializer.save()
@@ -144,6 +153,7 @@ def verify_email_otp(request):
 
 @api_view(["POST"])
 @permission_classes([permissions.AllowAny])
+@throttle_classes([PasswordResetRateThrottle])
 def request_password_reset(request):
     """Always returns 200 — never reveal whether the email is registered."""
     email = (request.data.get("email") or "").strip().lower()

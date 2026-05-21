@@ -165,6 +165,18 @@ REST_FRAMEWORK = {
     "DEFAULT_PAGINATION_CLASS": "rest_framework.pagination.PageNumberPagination",
     "PAGE_SIZE": 20,
     "DEFAULT_SCHEMA_CLASS": "drf_spectacular.openapi.AutoSchema",
+    # Rates for the per-endpoint throttles in apps/accounts/throttles.py. Only the
+    # auth endpoints that attach those throttle classes are limited — there is no
+    # DEFAULT_THROTTLE_CLASSES, so the rest of the API is unthrottled.
+    "DEFAULT_THROTTLE_RATES": {
+        "login": "5/min",
+        "register": "5/hour",
+        "password_reset": "5/hour",
+    },
+    # How many trusted proxies sit in front of the app. Required for IP-based
+    # throttling to use the real client IP from X-Forwarded-For rather than the
+    # proxy's address. None lets DRF take the first XFF entry. Tune per environment.
+    "NUM_PROXIES": env.int("DRF_NUM_PROXIES", default=None),
 }
 
 SIMPLE_JWT = {

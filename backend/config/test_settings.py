@@ -20,6 +20,14 @@ CHANNEL_LAYERS = {
     "default": {"BACKEND": "channels.layers.InMemoryChannelLayer"},
 }
 
+# Disable auth throttling by default so existing tests can register/login many
+# times from one IP. The dedicated throttle tests re-enable real rates via
+# override_settings. (None rate => AnonRateThrottle allows every request.)
+REST_FRAMEWORK = {
+    **REST_FRAMEWORK,  # noqa: F405
+    "DEFAULT_THROTTLE_RATES": {"login": None, "register": None, "password_reset": None},
+}
+
 CELERY_TASK_ALWAYS_EAGER = True
 CELERY_TASK_EAGER_PROPAGATES = True
 
