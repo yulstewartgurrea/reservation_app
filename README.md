@@ -23,7 +23,7 @@ docker compose up --build
 cd frontend && npm install && npm run dev
 ```
 
-`backend/.env` ships with dev defaults (copy from `backend/.env.example` for fresh installs). On `web` startup the container runs `makemigrations → migrate → seed_categories → runserver`. The frontend dev server expects the API at `http://localhost:8000` (override with `NEXT_PUBLIC_API_URL`).
+`backend/.env` ships with dev defaults (copy from `backend/.env.example` for fresh installs). On `web` startup the container runs `makemigrations → migrate → seed_categories → seed_psgc → runserver`. The frontend dev server expects the API at `http://localhost:8000` (override with `NEXT_PUBLIC_API_URL`).
 
 Create a superuser:
 
@@ -105,6 +105,7 @@ backend/
     notifications/       # Notification model, REST API, Channels consumer, signals, push helpers
     admin_panel/         # platform-admin endpoints (overview, pending shops, commission ledger)
     payments/            # Payment model, PayMongo client, checkout, webhook, refund
+    locations/           # PSGC master data (region/province/city/barangay) + read-only cascading API
   templates/emails/      # booking_confirmation/_confirmed/_completed, booking_reminder, verify_email, password_reset (txt+html)
 frontend/
   src/
@@ -253,6 +254,16 @@ All routes are prefixed `/api/` unless noted. JWT required except where marked *
 - `POST rooms/<id>/unread/` — body `{message_id}` → rewind so the target and everything after count as unread
 - `PATCH messages/<id>/` — body `{body}` → edit your own message (sets `edited_at`)
 - `GET unread-count/` — total unread across all rooms
+
+### Locations (`/api/locations/`) — public, read-only
+PSGC (Philippine Standard Geographic Code) master data for cascading address dropdowns. All endpoints are `AllowAny`, unpaginated (full filtered list), ordered by name.
+- **public** `GET provinces/` — every province: `{code, name, type, region_code, region_name, island_group}` (`type` is `province`/`district`/`independent-city`)
+- **public** `GET cities/?province=<code>` — cities/municipalities of that province: `{code, name, type, is_capital, province_code}`. `province` is **required** → 400 if missing
+- **public** `GET barangays/?city=<code>` — barangays of that city: `{code, name, city_code}`. `city` is **required** → 400 if missing
+
+Seeded once at `web` startup (`seed_psgc`, idempotent) from `apps/locations/data/psgc_hierarchy.json`: 17 regions, 87 provinces, 1648 cities/municipalities, 42046 barangays. `Shop` carries denormalized `province_code`/`city_code`/`barangay_code` alongside the existing human-readable name fields.
+
+The shop create ([my-shops/new/page.tsx](frontend/src/app/my-shops/new/page.tsx)) and edit ([my-shops/[id]/edit/_client.tsx](frontend/src/app/my-shops/[id]/edit/_client.tsx)) forms consume these endpoints via the shared [LocationFields.tsx](frontend/src/components/LocationFields.tsx) component as cascading dropdowns (province → city → barangay) **only when Country = Philippines**; other countries fall back to free-text inputs. Each level persists both the PSGC `code` and the display `name`. Lists are cached client-side with TanStack Query (`staleTime: Infinity` — PSGC is static). The source dataset and the build script that produced `psgc_hierarchy.json` live in [data/psgc/](data/psgc/).
 
 ### Admin panel (`/api/admin-panel/`) — admin only
 - `GET overview/` — shop counts, reservation counts, commission totals
@@ -596,6 +607,7 @@ Test settings module: [config/test_settings.py](backend/config/test_settings.py)
 | [chat/tests/test_services.py](backend/apps/chat/tests/test_services.py) | get-or-create idempotency, only-customer-can-open + only on active shops, sender must be a participant, edit only your own message, unread arithmetic across rooms, mark-read forward / mark-unread rewind incl. first-message edge case |
 | [chat/tests/test_api.py](backend/apps/chat/tests/test_api.py) | open room (customer-only), list scoped to self, outsiders 404, send / list / edit / mark-read / mark-unread end-to-end, global unread-count, unauthenticated 401 |
 | [chat/tests/test_presence.py](backend/apps/chat/tests/test_presence.py) | presence helpers (`is_online`, bulk `online_user_ids`) against a fake redis, peer fan-out (`peers_to_notify` returns chat-room counterparts), `ChatRoomSerializer.other_party_*` fields, and `ChatRoomConsumer` typing fan-out (room group + recipient's `user.<id>` group) via `WebsocketCommunicator` |
+| [locations/tests/test_locations.py](backend/apps/locations/tests/test_locations.py) | `seed_psgc` counts + FK links (barangay→city→province→region) from a tiny fixture, idempotency skip + `--force` reseed; provinces endpoint shape/region info, cities/barangays require + filter by parent code, missing query param → 400, all three public |
 
 ---
 
@@ -608,6 +620,9 @@ docker compose exec web python manage.py makemigrations
 
 # seed categories (idempotent)
 docker compose exec web python manage.py seed_categories
+
+# seed PSGC locations (idempotent; --force to wipe + reseed)
+docker compose exec web python manage.py seed_psgc
 
 # Django shell
 docker compose exec web python manage.py shell

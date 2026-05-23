@@ -26,6 +26,7 @@ import { formatApiError } from "@/lib/errors";
 import { ConfirmationDialog } from "@/components/ConfirmationDialog";
 import { FormField as Field, FormSection as Section } from "@/components/FormSection";
 import { geocodeAddress } from "@/components/LocationMap";
+import { LocationFields } from "@/components/LocationFields";
 import { LocationPicker, type PinResult } from "@/components/LocationPicker";
 import { PageHeader } from "@/components/PageHeader";
 import { Toast, ToastMessage } from "@/components/Toast";
@@ -38,6 +39,9 @@ type FormValues = {
   city: string;
   state_province: string;
   barangay: string;
+  province_code: string;
+  city_code: string;
+  barangay_code: string;
   postal_code: string;
   country: string;
   landmark: string;
@@ -83,6 +87,9 @@ function toFormValues(d: Partial<Shop>): FormValues {
     city: d.city ?? "",
     state_province: d.state_province ?? "",
     barangay: d.barangay ?? "",
+    province_code: d.province_code ?? "",
+    city_code: d.city_code ?? "",
+    barangay_code: d.barangay_code ?? "",
     postal_code: d.postal_code ?? "",
     country: d.country ?? "",
     landmark: d.landmark ?? "",
@@ -143,6 +150,10 @@ export default function EditShopPage() {
 
   function update<K extends keyof FormValues>(k: K, v: FormValues[K]) {
     setForm((prev) => (prev ? { ...prev, [k]: v } : prev));
+  }
+
+  function patch(p: Partial<FormValues>) {
+    setForm((prev) => (prev ? { ...prev, ...p } : prev));
   }
 
   function stagePhotos(e: ChangeEvent<HTMLInputElement>) {
@@ -295,14 +306,14 @@ export default function EditShopPage() {
       // Only fill empty fields — don't trample what the owner already typed.
       const fillIfEmpty = (cur: string, candidate?: string) =>
         cur.trim() || !candidate ? cur : candidate;
+      // Province / city / barangay are picked from the PSGC dropdowns (they
+      // carry codes), so we don't auto-fill them from reverse-geocoding here —
+      // the loose Nominatim names wouldn't map to a PSGC code.
       return {
         ...prev,
         latitude: result.lat.toFixed(6),
         longitude: result.lng.toFixed(6),
         address_line: fillIfEmpty(prev.address_line, a?.address_line),
-        city: fillIfEmpty(prev.city, a?.city),
-        state_province: fillIfEmpty(prev.state_province, a?.state_province),
-        barangay: fillIfEmpty(prev.barangay, a?.barangay),
         postal_code: fillIfEmpty(prev.postal_code, a?.postal_code),
         country: fillIfEmpty(prev.country, a?.country),
       };
@@ -518,6 +529,7 @@ export default function EditShopPage() {
           <LocationFormSection
             form={form}
             update={update}
+            patch={patch}
             canGeocode={canGeocode}
             geocodeFromAddress={geocodeFromAddress}
             applyPin={applyPin}
@@ -672,43 +684,6 @@ export default function EditShopPage() {
   );
 }
 
-function Select({
-  value,
-  onChange,
-  options,
-  placeholder,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  options: { value: string; label: string; disabled?: boolean }[];
-  placeholder?: string;
-}) {
-  return (
-    <div className="relative">
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full appearance-none rounded-lg border border-slate-300 bg-white px-3 py-2 pr-9 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-      >
-        {placeholder && !value && (
-          <option value="" disabled>
-            {placeholder}
-          </option>
-        )}
-        {options.map((o) => (
-          <option key={o.value} value={o.value} disabled={o.disabled}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-      <ChevronDown
-        size={16}
-        className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
-      />
-    </div>
-  );
-}
-
 const inputClasses =
   "w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500";
 
@@ -754,12 +729,14 @@ function IconInput({
 function LocationFormSection({
   form,
   update,
+  patch,
   canGeocode,
   geocodeFromAddress,
   applyPin,
 }: {
   form: FormValues;
   update: <K extends keyof FormValues>(k: K, v: FormValues[K]) => void;
+  patch: (p: Partial<FormValues>) => void;
   canGeocode: boolean;
   geocodeFromAddress: () => Promise<void>;
   applyPin: (result: PinResult) => void;
@@ -802,51 +779,19 @@ function LocationFormSection({
             />
           </Field>
 
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="Country" required>
-              <Select
-                value={form.country}
-                onChange={(v) => update("country", v)}
-                placeholder="Select country"
-                options={[
-                  { value: "", label: "Select country", disabled: true },
-                  ...COUNTRIES.map((c) => ({ value: c, label: c })),
-                ]}
-              />
-            </Field>
-            <Field label="State / Province" required>
-              <input
-                type="text"
-                value={form.state_province}
-                onChange={(e) => update("state_province", e.target.value)}
-                placeholder="e.g. Metro Manila"
-                required
-                className={inputClasses}
-              />
-            </Field>
-          </div>
-
-          <div className="grid gap-4 sm:grid-cols-2">
-            <Field label="City / Municipality" required>
-              <input
-                type="text"
-                value={form.city}
-                onChange={(e) => update("city", e.target.value)}
-                placeholder="e.g. Iligan"
-                required
-                className={inputClasses}
-              />
-            </Field>
-            <Field label="Barangay / District">
-              <input
-                type="text"
-                value={form.barangay}
-                onChange={(e) => update("barangay", e.target.value)}
-                placeholder="e.g. Pala-o"
-                className={inputClasses}
-              />
-            </Field>
-          </div>
+          <LocationFields
+            values={{
+              country: form.country,
+              state_province: form.state_province,
+              city: form.city,
+              barangay: form.barangay,
+              province_code: form.province_code,
+              city_code: form.city_code,
+              barangay_code: form.barangay_code,
+            }}
+            countries={COUNTRIES}
+            onPatch={patch}
+          />
 
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="ZIP / Postal Code" required>

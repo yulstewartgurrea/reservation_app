@@ -20,6 +20,7 @@ import { api } from "@/lib/api";
 import { formatApiError } from "@/lib/errors";
 import { SERVICE_FEE_TERMS } from "@/lib/billing";
 import { FormField as Field, FormSection as Section } from "@/components/FormSection";
+import { LocationFields } from "@/components/LocationFields";
 import { LocationMap, geocodeAddress } from "@/components/LocationMap";
 import { SidebarCard } from "@/components/SidebarCard";
 import { Toast, ToastMessage } from "@/components/Toast";
@@ -29,6 +30,11 @@ type FormValues = {
   description: string;
   address_line: string;
   city: string;
+  state_province: string;
+  barangay: string;
+  province_code: string;
+  city_code: string;
+  barangay_code: string;
   postal_code: string;
   country: string;
   phone: string;
@@ -61,6 +67,11 @@ function empty(): FormValues {
     description: "",
     address_line: "",
     city: "",
+    state_province: "",
+    barangay: "",
+    province_code: "",
+    city_code: "",
+    barangay_code: "",
     postal_code: "",
     country: "",
     phone: "",
@@ -87,6 +98,10 @@ export default function NewShopPage() {
 
   function update<K extends keyof FormValues>(k: K, v: FormValues[K]) {
     setForm((prev) => ({ ...prev, [k]: v }));
+  }
+
+  function patch(p: Partial<FormValues>) {
+    setForm((prev) => ({ ...prev, ...p }));
   }
 
   // Revoke object URLs on unmount so previews don't leak.
@@ -313,48 +328,40 @@ export default function NewShopPage() {
           >
             <div className="grid gap-4 lg:grid-cols-3">
               <div className="space-y-4 lg:col-span-2">
-                <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
-                  <Field label="Address" required>
-                    <input
-                      type="text"
-                      value={form.address_line}
-                      onChange={(e) => update("address_line", e.target.value)}
-                      placeholder="e.g. 123 Main Street"
-                      required
-                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-                    />
-                  </Field>
-                  <Field label="City" required>
-                    <input
-                      type="text"
-                      value={form.city}
-                      onChange={(e) => update("city", e.target.value)}
-                      placeholder="e.g. New York"
-                      required
-                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-                    />
-                  </Field>
-                  <Field label="Postal code">
-                    <input
-                      type="text"
-                      value={form.postal_code}
-                      onChange={(e) => update("postal_code", e.target.value)}
-                      placeholder="e.g. 10001"
-                      className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-                    />
-                  </Field>
-                  <Field label="Country" required>
-                    <Select
-                      value={form.country}
-                      onChange={(v) => update("country", v)}
-                      placeholder="Select country"
-                      options={[
-                        { value: "", label: "Select country", disabled: true },
-                        ...COUNTRIES.map((c) => ({ value: c, label: c })),
-                      ]}
-                    />
-                  </Field>
-                </div>
+                <Field label="Address" required>
+                  <input
+                    type="text"
+                    value={form.address_line}
+                    onChange={(e) => update("address_line", e.target.value)}
+                    placeholder="e.g. 123 Main Street"
+                    required
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                  />
+                </Field>
+
+                <LocationFields
+                  values={{
+                    country: form.country,
+                    state_province: form.state_province,
+                    city: form.city,
+                    barangay: form.barangay,
+                    province_code: form.province_code,
+                    city_code: form.city_code,
+                    barangay_code: form.barangay_code,
+                  }}
+                  countries={COUNTRIES}
+                  onPatch={patch}
+                />
+
+                <Field label="Postal code">
+                  <input
+                    type="text"
+                    value={form.postal_code}
+                    onChange={(e) => update("postal_code", e.target.value)}
+                    placeholder="e.g. 10001"
+                    className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 sm:max-w-xs"
+                  />
+                </Field>
               </div>
               <div className="lg:col-span-1">
                 <LocationMap
@@ -559,41 +566,5 @@ function StepDot({
   );
 }
 
-function Select({
-  value,
-  onChange,
-  options,
-  placeholder,
-}: {
-  value: string;
-  onChange: (v: string) => void;
-  options: { value: string; label: string; disabled?: boolean }[];
-  placeholder?: string;
-}) {
-  return (
-    <div className="relative">
-      <select
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-        className="w-full appearance-none rounded-lg border border-slate-300 bg-white px-3 py-2 pr-9 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-      >
-        {placeholder && !value && (
-          <option value="" disabled>
-            {placeholder}
-          </option>
-        )}
-        {options.map((o) => (
-          <option key={o.value} value={o.value} disabled={o.disabled}>
-            {o.label}
-          </option>
-        ))}
-      </select>
-      <ChevronDown
-        size={16}
-        className="pointer-events-none absolute right-3 top-1/2 -translate-y-1/2 text-slate-400"
-      />
-    </div>
-  );
-}
 
 

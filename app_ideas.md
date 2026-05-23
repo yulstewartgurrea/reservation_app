@@ -299,6 +299,14 @@ No online payments in v1. **Pay on arrival** only. Stripe integration is deferre
 - **v1 query approach:** **bounding-box + Haversine** in raw SQL — avoids the PostGIS dependency. Good enough for radius search at our scale.
 - **Phase 2:** migrate to PostGIS (`ST_DWithin`, `geography` type) once the radius query becomes a hotspot or we need polygon/region features.
 
+#### 8.5.1 PSGC location master DB (`apps.locations`)
+- **Why:** structured PH address entry needs canonical region → province → city/municipality → barangay data with stable codes, so shop addresses are normalized and searchable rather than free-text.
+- **Source:** the full PSGC hierarchy ships in-app at `apps/locations/data/psgc_hierarchy.json` (copied from repo-root `data/psgc/` — the repo-root `data/` folder is NOT mounted into the container/ECS, so the seed reads the in-app copy). 17 regions / 87 provinces / 1648 cities-municipalities / 42046 barangays.
+- **Models:** `Region`, `Province`, `CityMunicipality`, `Barangay` — all keyed on the PSGC `code` as a **CharField PK** (codes are zero-padded strings; never an IntegerField). FK chain cascades downward.
+- **Seed:** `manage.py seed_psgc` → `services.seed_psgc(force=False)`. Idempotent (skips if barangays exist); `--force` wipes + reseeds. Uses `bulk_create(batch_size=2000)` inside `@transaction.atomic` (not `update_or_create` — that's ~44k queries). Wired into `web` startup after `seed_categories`; the idempotency means it only does heavy work once.
+- **API:** read-only, public (`AllowAny`), unpaginated cascading lookups under `/api/locations/` — `provinces/`, `cities/?province=<code>`, `barangays/?city=<code>` (child params required → 400). Frontend owns the dropdown UX; this is the data contract behind it.
+- **Shop linkage:** `Shop` gets denormalized `province_code` / `city_code` / `barangay_code` (CharFields, NOT FKs) alongside the existing human-readable `state_province` / `city` / `barangay` name fields. Denormalized-by-design: the name fields stay authoritative for display and never break if PSGC data is re-versioned; the codes enable structured filtering/joins.
+
 ### 8.6 Walk-ins
 **Pattern: manual booking by shop owner** (the 80% solution; reuses the Reservation model).
 

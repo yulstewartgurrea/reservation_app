@@ -34,6 +34,11 @@ class Shop(models.Model):
     city = models.CharField(max_length=100)
     state_province = models.CharField(max_length=100, blank=True)
     barangay = models.CharField(max_length=100, blank=True)
+    # Denormalized PSGC codes (NOT FKs); the human-readable name fields above
+    # stay authoritative for display. See apps.locations.
+    province_code = models.CharField(max_length=12, blank=True, default="")
+    city_code = models.CharField(max_length=12, blank=True, default="")
+    barangay_code = models.CharField(max_length=12, blank=True, default="")
     postal_code = models.CharField(max_length=20, blank=True)
     country = models.CharField(max_length=64, default="")
     landmark = models.CharField(max_length=255, blank=True)
