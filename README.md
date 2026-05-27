@@ -184,9 +184,10 @@ All routes are prefixed `/api/` unless noted. JWT required except where marked *
 - **public** `POST password/reset/confirm/` `{token, new_password}` — apply reset
 
 ### Shops (`/api/shops/`)
-- **public** `GET /` — list active shops (paginated 12/page, `page_size` overridable up to 48; search, filter by city/category, ordering)
+- **public** `GET /` — list active shops (paginated 12/page, `page_size` overridable up to 48; search, filter by `city`/`category`, `?min_rating=4` (drops shops below that avg rating, NULL ratings dropped), `?booking_date=YYYY-MM-DD` (keeps only shops with at least one bookable slot that day — uses a SQL "open-that-day" pre-filter, then a per-shop `compute_slots` check; past dates return empty), `?booking_time=HH:MM` (only meaningful alongside `booking_date`; narrows matches to shops with a slot starting within ±30 min of the requested time), `?guests=N` (1–50; only meaningful alongside `booking_date`; drops shops whose services all cap `max_quantity` below N), ordering by `created_at`/`name`/`avg_rating`/`reviews_count` — e.g. `?ordering=-avg_rating`). Each row carries `services_count`, `reviews_count`, `avg_rating` (rounded to 1 decimal, null when unrated) and `is_open_now` (computed against `WeekdayHours` + today's `HoursOverride` in `settings.TIME_ZONE`) so cards can render rating/services chips and an Open/Closed pill in one request.
 - **public** `GET /<id>/` — shop detail (photos, weekday hours)
 - **public** `GET nearby/?lat&lng&radius_km` — Haversine search
+- **public** `GET cities/` — distinct A-Z list of active-shop cities for the browse-page filter dropdown (plain `["City A", "City B", ...]`, unpaginated)
 - **public** `GET categories/` — shop categories
 - `GET mine/` — owner's shops (paginated 12/page, `page_size` overridable up to 48)
 - `GET commission-invoices/?status=` — owner's monthly commission invoices across all their shops
@@ -302,7 +303,7 @@ Mobile-first responsive across the board. Role-gated where indicated.
 | `/reset-password?token=…` | Set new password |
 | `/verify-email?token=…` | Email verification (legacy link-based) |
 | `/verify-otp?email=…` | 6-digit OTP verification (post-signup) |
-| `/shops` | Shop browse + "Find shops near me" |
+| `/shops` | Shop browse — unified pill search bar (shop name + when (date + time) + city + guests + Search button), expandable "More filters" panel (category chips + minimum rating), sort dropdown, grid/list view toggle, "Find shops near me", richer cards (cover, Open/Closed pill, categories, ★ rating + reviews count, services count). The `booking_date` filter only returns shops with at least one free slot on the chosen day; adding `booking_time` narrows to ±30 min of that time, and `guests` drops shops whose services can't accept the party size. All filter/view state is in the URL ([page.tsx](frontend/src/app/shops/page.tsx) · [ShopCard.tsx](frontend/src/components/ShopCard.tsx) · [ShopListRow.tsx](frontend/src/components/ShopListRow.tsx)). |
 | `/shops/[id]` | Shop detail (photos, services, reviews) |
 | `/services` | Cross-shop service search |
 

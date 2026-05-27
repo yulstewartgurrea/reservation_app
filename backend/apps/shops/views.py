@@ -2,7 +2,7 @@ import math
 from datetime import datetime
 
 from django.db import transaction
-from django.db.models import Q
+from django.db.models import Avg, Count, Prefetch, Q
 from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
@@ -80,7 +80,20 @@ class ShopViewSet(viewsets.ModelViewSet):
     pagination_class = ShopPagination
     filterset_fields = ["status", "city", "categories"]
     search_fields = ["name", "description", "city"]
-    ordering_fields = ["created_at", "name"]
+    # The list action annotates `_avg_rating` / `_reviews_count` onto each
+    # shop (see `get_queryset`); exposing both the public alias and the
+    # underscored column here lets the frontend send the friendlier name
+    # while DRF's OrderingFilter still resolves the rewrite produced in
+    # `filter_queryset`. Frontend ordering strings: `-avg_rating`,
+    # `-reviews_count`, `-created_at`, `name`.
+    ordering_fields = [
+        "created_at",
+        "name",
+        "avg_rating",
+        "reviews_count",
+        "_avg_rating",
+        "_reviews_count",
+    ]
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -90,7 +103,7 @@ class ShopViewSet(viewsets.ModelViewSet):
         return ShopDetailSerializer
 
     def get_permissions(self):
-        if self.action in ("list", "retrieve", "nearby"):
+        if self.action in ("list", "retrieve", "nearby", "cities"):
             return [permissions.AllowAny()]
         if self.action == "create":
             return [IsShopOwner()]
@@ -99,10 +112,155 @@ class ShopViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         if self.action == "list":
-            qs = qs.filter(status=Shop.Status.ACTIVE)
+            today = timezone.localdate()
+            qs = (
+                qs.filter(status=Shop.Status.ACTIVE)
+                .annotate(
+                    _services_count=Count(
+                        "services",
+                        filter=Q(services__is_active=True),
+                        distinct=True,
+                    ),
+                    _reviews_count=Count("reviews", distinct=True),
+                    _avg_rating=Avg("reviews__rating"),
+                )
+                .prefetch_related(
+                    "categories",
+                    "photos",
+                    "weekday_hours",
+                    Prefetch(
+                        "overrides",
+                        queryset=HoursOverride.objects.filter(date=today),
+                        to_attr="_prefetched_overrides_today",
+                    ),
+                )
+            )
         if self.action in ("update", "partial_update", "destroy"):
             qs = qs.filter(owner=self.request.user)
         return qs
+
+    def filter_queryset(self, queryset):
+        """Translate the public `ordering` aliases onto the annotation columns.
+
+        We expose `avg_rating` / `reviews_count` (clean public names) but
+        store them as `_avg_rating` / `_reviews_count` on the queryset to
+        avoid colliding with the reverse-accessor names. Rewriting the
+        query param here keeps DRF's OrderingFilter happy without polluting
+        the annotation namespace.
+
+        Also applies the public `booking_date` and `min_rating` filters used
+        by the browse page. `booking_date` is a Python-side filter (slot
+        computation), so we narrow with a coarse SQL "is-open-that-day"
+        pre-filter first to keep the work bounded.
+        """
+        ordering = self.request.query_params.get("ordering")
+        if ordering:
+            translated = []
+            for part in ordering.split(","):
+                key = part.strip()
+                if not key:
+                    continue
+                prefix = ""
+                if key.startswith("-"):
+                    prefix, key = "-", key[1:]
+                if key in ("avg_rating", "reviews_count"):
+                    key = f"_{key}"
+                translated.append(f"{prefix}{key}")
+            if translated:
+                new_value = ",".join(translated)
+                if new_value != ordering:
+                    mutable = self.request.GET.copy()
+                    mutable["ordering"] = new_value
+                    self.request._request.GET = mutable
+
+        qs = super().filter_queryset(queryset)
+        qs = self._apply_min_rating(qs)
+        qs = self._apply_booking_date(qs)
+        return qs
+
+    def _apply_min_rating(self, queryset):
+        raw = self.request.query_params.get("min_rating")
+        if not raw:
+            return queryset
+        try:
+            threshold = float(raw)
+        except ValueError:
+            return queryset
+        return queryset.filter(_avg_rating__gte=threshold)
+
+    def _apply_booking_date(self, queryset):
+        raw = self.request.query_params.get("booking_date")
+        if not raw:
+            return queryset
+        try:
+            target = datetime.strptime(raw, "%Y-%m-%d").date()
+        except ValueError:
+            return queryset
+        if target < timezone.localdate():
+            return queryset.none()
+
+        target_time = self._parse_booking_time()
+        guests = self._parse_guests()
+
+        from .services import shop_has_free_slot_on_date
+
+        weekday = target.weekday()
+        candidates = (
+            queryset.filter(
+                Q(
+                    weekday_hours__weekday=weekday,
+                    weekday_hours__is_closed=False,
+                    weekday_hours__open_time__isnull=False,
+                    weekday_hours__close_time__isnull=False,
+                )
+                | Q(
+                    overrides__date=target,
+                    overrides__is_closed=False,
+                    overrides__open_time__isnull=False,
+                    overrides__close_time__isnull=False,
+                )
+            )
+            .exclude(overrides__date=target, overrides__is_closed=True)
+            .distinct()
+            .prefetch_related("services", "resources")
+        )
+        matching_ids = [
+            s.id
+            for s in candidates
+            if shop_has_free_slot_on_date(
+                s, target, target_time=target_time, quantity=guests
+            )
+        ]
+        return queryset.filter(id__in=matching_ids)
+
+    def _parse_booking_time(self):
+        """Parse `?booking_time=HH:MM`. Returns None if missing or malformed.
+
+        Silently ignoring malformed input mirrors `_apply_booking_date`'s
+        contract: bad filter params shouldn't 400 a browse page request.
+        """
+        raw = self.request.query_params.get("booking_time")
+        if not raw:
+            return None
+        for fmt in ("%H:%M", "%H:%M:%S"):
+            try:
+                return datetime.strptime(raw, fmt).time()
+            except ValueError:
+                continue
+        return None
+
+    def _parse_guests(self) -> int:
+        """Parse `?guests=N` (party size / units). Defaults to 1; clamps to
+        a sane upper bound so a hostile caller can't ask us to scan services
+        for `guests=999999`."""
+        raw = self.request.query_params.get("guests")
+        if not raw:
+            return 1
+        try:
+            value = int(raw)
+        except ValueError:
+            return 1
+        return max(1, min(value, 50))
 
     def create(self, request, *args, **kwargs):
         """Override to return the detail representation (with id, status, etc.)."""
@@ -170,6 +328,24 @@ class ShopViewSet(viewsets.ModelViewSet):
             if coords:
                 data["latitude"], data["longitude"] = coords
         serializer.save()
+
+    @action(detail=False, methods=["get"], permission_classes=[permissions.AllowAny])
+    def cities(self, request):
+        """Distinct cities of currently-active shops, A-Z, unpaginated.
+
+        Powers the city dropdown on the public browse page. Kept tiny —
+        plain list of strings — because dropdowns don't need pagination
+        and an A-Z sort is more useful than the default queryset order.
+        """
+        names = (
+            Shop.objects.filter(status=Shop.Status.ACTIVE)
+            .exclude(city="")
+            .exclude(city__isnull=True)
+            .values_list("city", flat=True)
+            .distinct()
+            .order_by("city")
+        )
+        return Response(list(names))
 
     @action(detail=False, methods=["get"], permission_classes=[permissions.AllowAny])
     def nearby(self, request):
