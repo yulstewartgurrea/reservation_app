@@ -9,6 +9,7 @@ from .models import (
     ShopPhoto,
     Staff,
     StaffWorkingHours,
+    TimeBlock,
     WeekdayHours,
 )
 
@@ -197,3 +198,39 @@ class FavoriteSerializer(serializers.ModelSerializer):
         model = Favorite
         fields = ("id", "shop", "shop_detail", "created_at")
         read_only_fields = ("created_at",)
+
+
+class TimeBlockSerializer(serializers.ModelSerializer):
+    """Owner-managed time block (breaks, maintenance, vacations).
+
+    `resource` and `staff` are both optional FKs. The combinations:
+      * `resource` set, `staff` unset  → blocks just that station.
+      * both unset                     → blocks the whole shop.
+      * `staff` set, `resource` unset  → informational (does NOT remove
+        capacity); the booking engine ignores it. We accept it here so the
+        owner can still record it on a staff member's profile.
+    """
+
+    class Meta:
+        model = TimeBlock
+        fields = ("id", "shop", "resource", "staff", "start_at", "end_at", "reason")
+
+    def validate(self, attrs):
+        start_at = attrs.get("start_at") or getattr(self.instance, "start_at", None)
+        end_at = attrs.get("end_at") or getattr(self.instance, "end_at", None)
+        if start_at and end_at and end_at <= start_at:
+            raise serializers.ValidationError(
+                {"end_at": "end_at must be strictly after start_at."}
+            )
+        resource = attrs.get("resource") if "resource" in attrs else getattr(self.instance, "resource", None)
+        shop = attrs.get("shop") if "shop" in attrs else getattr(self.instance, "shop", None)
+        if resource is not None and shop is not None and resource.shop_id != shop.id:
+            raise serializers.ValidationError(
+                {"resource": "Resource does not belong to this shop."}
+            )
+        staff = attrs.get("staff") if "staff" in attrs else getattr(self.instance, "staff", None)
+        if staff is not None and shop is not None and staff.shop_id != shop.id:
+            raise serializers.ValidationError(
+                {"staff": "Staff does not belong to this shop."}
+            )
+        return attrs

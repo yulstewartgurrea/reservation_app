@@ -1,4 +1,4 @@
-import ClientPage from "./_client";
+import StationsClient from "./_client";
 
 // Static export requires generateStaticParams on every page under a dynamic segment.
 // Returning a placeholder means "don't pre-render specific IDs" — the runtime SPA
@@ -8,5 +8,5 @@ export async function generateStaticParams() {
 }
 
 export default function Page() {
-  return <ClientPage />;
+  return <StationsClient />;
 }

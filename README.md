@@ -197,8 +197,10 @@ All routes are prefixed `/api/` unless noted. JWT required except where marked *
 - `GET / POST /<id>/overrides/` · `DELETE /<id>/overrides/<override_id>/` — date overrides
 - `GET / POST /<id>/photos/` (multipart) · `DELETE /<id>/photos/<photo_id>/` — shop photos
 - `GET /<id>/analytics/?days=30` — owner-only analytics
+- `GET /<id>/stations-availability/?date=YYYY-MM-DD` (owner-only) — real-time per-station availability dashboard for a single day. Returns `shop` (resource label, open/close, `is_closed`), `summary` (total/available/busy/upcoming counts), and `stations[]` (each with `current_status` `available`/`busy`/`blocked`/`offline`/`closed`, `busy_until`, `next_available_at`, a non-overlapping `segments[]` timeline of `available`/`reserved`/`blocked` covering `[open, close)`, and the raw `bookings[]` + `blocks[]` payloads). Inactive stations are returned (`current_status="offline"`) but excluded from summary counts. Default `date` is today. Reservations win over time blocks where they overlap.
 - Staff sub-resource: `GET /staff/?shop=<id>`, `POST/PATCH/DELETE /staff/<id>/`, `GET / PUT /staff/<id>/hours/`
 - Resources (bookable stations — the shop's capacity): `GET /resources/?shop=<id>` (public sees active only; owner sees all), `POST/PATCH/DELETE /resources/<id>/` (owner). DELETE soft-retires (`is_active=False`) if the resource has bookings, else hard-deletes. Per-shop display word is `Shop.resource_label` (Bay/Chair/Room/Slot; default "Station"), editable via `PATCH /shops/<id>/`.
+- Time blocks (manually carved-off capacity — breaks, maintenance, vacations): `GET/POST/PATCH/DELETE /time-blocks/` (owner-only). Filter list with `?shop=<id>`, `?resource=<id>`, `?from=YYYY-MM-DD`, `?to=YYYY-MM-DD` (inclusive on `start_at__date`). Payload: `{shop, resource?, staff?, start_at, end_at, reason?}`. With `resource` set, blocks just that station; with both unset, blocks the whole shop; with only `staff` set, the block is informational and does NOT remove availability.
 - Favorites: `GET / POST /favorites/`, `DELETE /favorites/<id>/` (customer-only)
 
 ### Services (`/api/services/`)

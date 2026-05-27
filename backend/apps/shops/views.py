@@ -1,7 +1,9 @@
 import math
+from datetime import datetime
 
 from django.db import transaction
 from django.db.models import Q
+from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.pagination import PageNumberPagination
@@ -20,6 +22,7 @@ from .models import (
     ShopPhoto,
     Staff,
     StaffWorkingHours,
+    TimeBlock,
     WeekdayHours,
 )
 from .serializers import (
@@ -33,6 +36,7 @@ from .serializers import (
     ShopWriteSerializer,
     StaffSerializer,
     StaffWorkingHoursSerializer,
+    TimeBlockSerializer,
     WeekdayHoursSerializer,
 )
 
@@ -417,6 +421,37 @@ class ShopViewSet(viewsets.ModelViewSet):
         HoursOverride.objects.filter(shop=shop, id=override_id).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
 
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="stations-availability",
+        permission_classes=[IsShopOwner],
+    )
+    def stations_availability(self, request, pk=None):
+        """Per-station availability + timeline for a single day.
+
+        Thin HTTP wrapper around `services.station_day_availability`.
+        Powers the shop-owner Stations dashboard. See the service docstring
+        for the response shape.
+        """
+        shop = self.get_object()
+        if shop.owner_id != request.user.id:
+            return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
+        raw = request.query_params.get("date")
+        if raw:
+            try:
+                target = datetime.strptime(raw, "%Y-%m-%d").date()
+            except ValueError:
+                return Response(
+                    {"detail": "date must be YYYY-MM-DD."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            target = timezone.localdate()
+        from .services import station_day_availability
+
+        return Response(station_day_availability(shop, target))
+
     @action(detail=True, methods=["get"], permission_classes=[IsShopOwner])
     def analytics(self, request, pk=None):
         """Per-shop analytics for the owner: revenue, booking volume, no-show rate, top services."""
@@ -636,3 +671,64 @@ class FavoriteViewSet(viewsets.ModelViewSet):
 
     def perform_create(self, serializer):
         serializer.save(customer=self.request.user)
+
+
+class TimeBlockViewSet(viewsets.ModelViewSet):
+    """Owner-managed `TimeBlock` CRUD.
+
+    A `TimeBlock` carves capacity off a Resource (or the whole shop) for a
+    finite window — breaks, maintenance, vacations. List/retrieve are scoped
+    to the requesting owner's shops; create/update/destroy require the user
+    to own the shop in the payload.
+    """
+
+    serializer_class = TimeBlockSerializer
+    permission_classes = [IsShopOwner]
+
+    def get_queryset(self):
+        user = self.request.user
+        if not (user and user.is_authenticated):
+            return TimeBlock.objects.none()
+        qs = TimeBlock.objects.filter(shop__owner=user)
+
+        shop_id = self.request.query_params.get("shop")
+        if shop_id:
+            if not Shop.objects.filter(pk=shop_id, owner=user).exists():
+                return TimeBlock.objects.none()
+            qs = qs.filter(shop_id=shop_id)
+
+        resource_id = self.request.query_params.get("resource")
+        if resource_id:
+            qs = qs.filter(resource_id=resource_id)
+
+        from_raw = self.request.query_params.get("from")
+        to_raw = self.request.query_params.get("to")
+        if from_raw:
+            try:
+                from_date = datetime.strptime(from_raw, "%Y-%m-%d").date()
+                qs = qs.filter(start_at__date__gte=from_date)
+            except ValueError:
+                pass
+        if to_raw:
+            try:
+                to_date = datetime.strptime(to_raw, "%Y-%m-%d").date()
+                qs = qs.filter(start_at__date__lte=to_date)
+            except ValueError:
+                pass
+        return qs.select_related("shop", "resource", "staff").order_by("start_at")
+
+    def perform_create(self, serializer):
+        shop = serializer.validated_data["shop"]
+        if shop.owner_id != self.request.user.id:
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied("You do not own this shop.")
+        serializer.save()
+
+    def perform_update(self, serializer):
+        shop = serializer.validated_data.get("shop") or serializer.instance.shop
+        if shop.owner_id != self.request.user.id:
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied("You do not own this shop.")
+        serializer.save()
