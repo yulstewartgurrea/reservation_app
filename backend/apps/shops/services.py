@@ -153,6 +153,44 @@ def shop_has_free_slot_on_date(
     return False
 
 
+def service_has_free_slot_on_date(
+    service,
+    target_date: date,
+    *,
+    quantity: int = 1,
+) -> bool:
+    """True if `service` itself has at least one bookable slot on `target_date`.
+
+    Per-service analogue of [[shop_has_free_slot_on_date]]: backs the public
+    services-browse `?booking_date=` / `?guests=` filters where customers ask
+    "which services can I book on this day for N people?". A service fails the
+    check when its own `max_quantity` is too low, its shop is closed, or none
+    of the shop's active resources yields a valid slot for it on that date.
+    """
+    from apps.reservations.availability import _shop_open_window, compute_slots
+
+    today = timezone.localdate()
+    if target_date < today:
+        return False
+
+    qty = max(int(quantity), 1)
+    if service.max_quantity < qty:
+        return False
+
+    shop = service.shop
+    if _shop_open_window(shop, target_date) is None:
+        return False
+
+    resources = list(shop.resources.filter(is_active=True).only("id"))
+    if not resources:
+        return False
+
+    for resource in resources:
+        if compute_slots(shop, service, resource, target_date, qty):
+            return True
+    return False
+
+
 # ---------------------------------------------------------------------------
 # Per-day station availability dashboard
 # ---------------------------------------------------------------------------

@@ -2,12 +2,20 @@ from django.conf import settings
 from django.db import models
 
 
-class ShopCategory(models.Model):
+class Category(models.Model):
+    """Unified category taxonomy used by both shops (M:N) and services (FK).
+
+    Previously split into `ShopCategory` and `services.ServiceCategory`;
+    consolidated so the `/shops` and `/services` browse pages show the same
+    options. The old `services.ServiceCategory` model was dropped in
+    `services/0008_*` and its FKs repointed here.
+    """
+
     name = models.CharField(max_length=64, unique=True)
     slug = models.SlugField(unique=True)
 
     class Meta:
-        verbose_name_plural = "Shop categories"
+        verbose_name_plural = "Categories"
         ordering = ["name"]
 
     def __str__(self) -> str:
@@ -27,7 +35,7 @@ class Shop(models.Model):
     )
     name = models.CharField(max_length=120)
     description = models.TextField(blank=True)
-    categories = models.ManyToManyField(ShopCategory, blank=True, related_name="shops")
+    categories = models.ManyToManyField(Category, blank=True, related_name="shops")
 
     address_line = models.CharField(max_length=255)
     address_line_2 = models.CharField(max_length=255, blank=True)

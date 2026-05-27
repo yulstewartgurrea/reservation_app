@@ -5,7 +5,7 @@ from .models import (
     HoursOverride,
     Resource,
     Shop,
-    ShopCategory,
+    Category,
     ShopPhoto,
     Staff,
     StaffWorkingHours,
@@ -21,9 +21,9 @@ class ResourceSerializer(serializers.ModelSerializer):
         read_only_fields = ("created_at",)
 
 
-class ShopCategorySerializer(serializers.ModelSerializer):
+class CategorySerializer(serializers.ModelSerializer):
     class Meta:
-        model = ShopCategory
+        model = Category
         fields = ("id", "name", "slug")
 
 
@@ -58,7 +58,7 @@ class StaffWorkingHoursSerializer(serializers.ModelSerializer):
 
 
 class ShopListSerializer(serializers.ModelSerializer):
-    categories = ShopCategorySerializer(many=True, read_only=True)
+    categories = CategorySerializer(many=True, read_only=True)
     cover_photo = serializers.SerializerMethodField()
     services_count = serializers.SerializerMethodField()
     reviews_count = serializers.SerializerMethodField()
@@ -122,7 +122,7 @@ class ShopListSerializer(serializers.ModelSerializer):
 
 
 class ShopDetailSerializer(serializers.ModelSerializer):
-    categories = ShopCategorySerializer(many=True, read_only=True)
+    categories = CategorySerializer(many=True, read_only=True)
     photos = ShopPhotoSerializer(many=True, read_only=True)
     cover_photo = serializers.SerializerMethodField()
     weekday_hours = WeekdayHoursSerializer(many=True, read_only=True)

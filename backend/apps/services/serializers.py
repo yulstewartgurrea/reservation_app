@@ -1,12 +1,13 @@
 from rest_framework import serializers
 
-from .models import Service, ServiceCategory, ServicePhoto, ServicePriceHistory
+from apps.shops.serializers import CategorySerializer
+
+from .models import Service, ServicePhoto, ServicePriceHistory
 
 
-class ServiceCategorySerializer(serializers.ModelSerializer):
-    class Meta:
-        model = ServiceCategory
-        fields = ("id", "name", "slug")
+# Backwards-compatible alias — existing imports / serializer field nesting
+# (`category_detail`) keep working after the model unification.
+ServiceCategorySerializer = CategorySerializer
 
 
 class ServicePhotoSerializer(serializers.ModelSerializer):

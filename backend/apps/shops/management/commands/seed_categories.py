@@ -1,11 +1,14 @@
 from django.core.management.base import BaseCommand
 from django.utils.text import slugify
 
-from apps.services.models import ServiceCategory
-from apps.shops.models import ShopCategory
+from apps.shops.models import Category
 
 
-SHOP_CATEGORIES = [
+# Single shared taxonomy. Shops tag themselves with one or more of these
+# (M:N); services pick exactly one (FK). The unified `apps.shops.Category`
+# table backs both `/api/shops/categories/` and `/api/services/categories/`
+# so the two browse-page sidebars show the same options.
+CATEGORIES = [
     "Hair & Beauty",
     "Wellness",
     "Home Services",
@@ -15,53 +18,19 @@ SHOP_CATEGORIES = [
     "Tech / Repair",
 ]
 
-SERVICE_CATEGORIES = [
-    "Haircut",
-    "Hair Color",
-    "Manicure",
-    "Pedicure",
-    "Massage",
-    "Spa",
-    "Sauna",
-    "Aircon Cleaning",
-    "Plumbing",
-    "Electrical",
-    "Pest Control",
-    "Car Repair",
-    "Car Wash",
-    "Car Detailing",
-    "Tire Change",
-    "Personal Training",
-    "Yoga Session",
-    "Pet Grooming",
-    "Vet Checkup",
-    "Phone Repair",
-    "Laptop Repair",
-]
-
 
 class Command(BaseCommand):
-    help = "Seed default shop and service categories."
+    help = "Seed default categories used by both shops and services."
 
     def handle(self, *args, **options):
-        created_shop = 0
-        for name in SHOP_CATEGORIES:
-            _, created = ShopCategory.objects.get_or_create(
+        created = 0
+        for name in CATEGORIES:
+            _, was_created = Category.objects.get_or_create(
                 slug=slugify(name), defaults={"name": name}
             )
-            if created:
-                created_shop += 1
-
-        created_service = 0
-        for name in SERVICE_CATEGORIES:
-            _, created = ServiceCategory.objects.get_or_create(
-                slug=slugify(name), defaults={"name": name}
-            )
-            if created:
-                created_service += 1
+            if was_created:
+                created += 1
 
         self.stdout.write(
-            self.style.SUCCESS(
-                f"Seeded {created_shop} shop categories and {created_service} service categories."
-            )
+            self.style.SUCCESS(f"Seeded {created} categories (total: {Category.objects.count()}).")
         )

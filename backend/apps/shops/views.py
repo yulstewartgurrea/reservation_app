@@ -15,10 +15,10 @@ from apps.accounts.permissions import IsCustomer, IsShopOwner
 from .geocoding import geocode_address
 from .models import (
     Favorite,
+    Category,
     HoursOverride,
     Resource,
     Shop,
-    ShopCategory,
     ShopPhoto,
     Staff,
     StaffWorkingHours,
@@ -26,10 +26,10 @@ from .models import (
     WeekdayHours,
 )
 from .serializers import (
+    CategorySerializer,
     FavoriteSerializer,
     HoursOverrideSerializer,
     ResourceSerializer,
-    ShopCategorySerializer,
     ShopDetailSerializer,
     ShopListSerializer,
     ShopPhotoSerializer,
@@ -69,9 +69,11 @@ class ShopPagination(PageNumberPagination):
     max_page_size = 48
 
 
-class ShopCategoryViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = ShopCategory.objects.all()
-    serializer_class = ShopCategorySerializer
+class CategoryViewSet(viewsets.ReadOnlyModelViewSet):
+    """Public read-only list of the unified category taxonomy."""
+
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
     permission_classes = [permissions.AllowAny]
 
 

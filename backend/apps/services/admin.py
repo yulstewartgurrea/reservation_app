@@ -1,6 +1,6 @@
 from django.contrib import admin
 
-from .models import Service, ServiceCategory, ServicePriceHistory, StaffService
+from .models import Service, ServicePriceHistory, StaffService
 
 
 @admin.register(Service)
@@ -18,5 +18,6 @@ class ServicePriceHistoryAdmin(admin.ModelAdmin):
     readonly_fields = ("service", "old_price", "new_price", "changed_by", "created_at")
 
 
-admin.site.register(ServiceCategory)
+# Category admin is registered once via apps/shops/admin.py since the model
+# now lives there.
 admin.site.register(StaffService)

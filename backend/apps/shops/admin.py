@@ -1,10 +1,10 @@
 from django.contrib import admin
 
 from .models import (
+    Category,
     Favorite,
     HoursOverride,
     Shop,
-    ShopCategory,
     ShopPhoto,
     Staff,
     StaffWorkingHours,
@@ -31,7 +31,7 @@ class ShopAdmin(admin.ModelAdmin):
     inlines = [WeekdayHoursInline, ShopPhotoInline]
 
 
-admin.site.register(ShopCategory)
+admin.site.register(Category)
 admin.site.register(Staff)
 admin.site.register(StaffWorkingHours)
 admin.site.register(HoursOverride)

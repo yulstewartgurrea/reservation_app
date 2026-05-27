@@ -2,22 +2,17 @@ from django.conf import settings
 from django.db import models
 
 
-class ServiceCategory(models.Model):
-    name = models.CharField(max_length=64, unique=True)
-    slug = models.SlugField(unique=True)
-
-    class Meta:
-        verbose_name_plural = "Service categories"
-        ordering = ["name"]
-
-    def __str__(self) -> str:
-        return self.name
-
-
 class Service(models.Model):
     shop = models.ForeignKey("shops.Shop", on_delete=models.CASCADE, related_name="services")
+    # Single unified taxonomy lives in `apps.shops.Category` — the same table
+    # backs Shop.categories (M:N). Repointed away from the dropped
+    # `ServiceCategory` model in services/0008_unify_with_shops_category.
     category = models.ForeignKey(
-        ServiceCategory, on_delete=models.SET_NULL, null=True, blank=True, related_name="services"
+        "shops.Category",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="services",
     )
     name = models.CharField(max_length=120)
     description = models.TextField(blank=True)
