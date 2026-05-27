@@ -13,6 +13,7 @@ import {
   SlidersHorizontal,
   Star,
   Store,
+  Tag,
   Users,
   X,
 } from "lucide-react";
@@ -45,9 +46,8 @@ const SORT_OPTIONS: { value: string; label: string; ordering: string }[] = [
 ];
 
 const RATING_OPTIONS: { value: string; label: string }[] = [
-  { value: "3", label: "3+" },
-  { value: "4", label: "4+" },
-  { value: "4.5", label: "4.5+" },
+  { value: "4", label: "4★ & up" },
+  { value: "4.5", label: "4.5★ & up" },
 ];
 
 // Today (YYYY-MM-DD in local time) — guards the date picker so customers
@@ -99,11 +99,7 @@ function ShopsPageInner() {
   const [selectedCategories, setSelectedCategories] =
     useState<number[]>(initialCategoryIds);
   const [minRating, setMinRating] = useState(params.get("min_rating") ?? "");
-  const [showMoreFilters, setShowMoreFilters] = useState(() =>
-    Boolean(
-      params.get("categories") || params.get("min_rating")
-    )
-  );
+  const [mobileFiltersOpen, setMobileFiltersOpen] = useState(false);
   const [page, setPage] = useState(() => {
     const raw = Number(params.get("page"));
     return Number.isFinite(raw) && raw > 0 ? raw : 1;
@@ -137,9 +133,6 @@ function ShopsPageInner() {
   ]);
 
   // Load the city + category dropdowns once on mount — tiny payloads.
-  // `/shops/categories/` uses DRF's default pagination, so we accept either
-  // a bare array or a `{ results }` envelope (matches the services-page
-  // pattern at frontend/src/app/services/page.tsx).
   useEffect(() => {
     let cancelled = false;
     api
@@ -297,6 +290,13 @@ function ShopsPageInner() {
       minRating,
     ]
   );
+  const activeFilterCount =
+    (debouncedQuery.trim() ? 1 : 0) +
+    (city ? 1 : 0) +
+    (bookingDate ? 1 : 0) +
+    (guests > 1 ? 1 : 0) +
+    selectedCategories.length +
+    (minRating ? 1 : 0);
   const showPagination = !isNearbyMode && totalCount > PAGE_SIZE;
 
   function clearNearby() {
@@ -321,70 +321,18 @@ function ShopsPageInner() {
   }
 
   return (
-    <div className="space-y-5 py-4">
+    <div className="py-4">
       {/* HEADER */}
-      <div className="flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
-        <div>
-          <h1 className="text-2xl font-semibold">Browse shops</h1>
-          <p className="mt-0.5 text-sm text-slate-500">
-            Discover local shops near you and book in seconds.
-          </p>
-        </div>
-        {!isNearbyMode && (
-          <button
-            onClick={requestNearby}
-            className="inline-flex items-center gap-1.5 self-start rounded-lg border border-brand-600 bg-white px-4 py-2 text-sm font-medium text-brand-600 hover:bg-brand-50"
-          >
-            <MapPin size={16} />
-            Find shops near me
-          </button>
-        )}
+      <div className="mb-5">
+        <h1 className="text-3xl font-bold text-slate-900">Browse shops</h1>
+        <p className="mt-1 text-sm text-slate-500">
+          Discover local shops near you and book in seconds.
+        </p>
       </div>
-
-      {/* FILTER BAR (hidden in nearby mode) */}
-      {!isNearbyMode && (
-        <>
-          <FilterBar
-            query={query}
-            onQueryChange={setQuery}
-            city={city}
-            onCityChange={setCity}
-            cities={cities}
-            bookingDate={bookingDate}
-            onBookingDateChange={setBookingDate}
-            guests={guests}
-            onGuestsChange={setGuests}
-            onSubmit={loadAll}
-          />
-
-          <FilterControls
-            sort={sort}
-            onSortChange={setSort}
-            showMoreFilters={showMoreFilters}
-            onToggleMoreFilters={() => setShowMoreFilters((v) => !v)}
-            moreFiltersCount={
-              (selectedCategories.length > 0 ? 1 : 0) + (minRating ? 1 : 0)
-            }
-            canReset={hasActiveFilter}
-            onReset={resetFilters}
-          />
-
-          {showMoreFilters && (
-            <MoreFiltersPanel
-              categories={categories}
-              selectedCategories={selectedCategories}
-              onToggleCategory={toggleCategory}
-              onClearCategories={() => setSelectedCategories([])}
-              minRating={minRating}
-              onMinRatingChange={setMinRating}
-            />
-          )}
-        </>
-      )}
 
       {/* NEARBY MODE BANNER */}
       {isNearbyMode && !loading && (
-        <div className="flex flex-col gap-2 rounded-lg border border-brand-100 bg-brand-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
+        <div className="mb-4 flex flex-col gap-2 rounded-lg border border-brand-100 bg-brand-50 px-4 py-3 sm:flex-row sm:items-center sm:justify-between">
           <p className="text-sm text-brand-900">
             <MapPin size={14} className="mr-1 inline-block" />
             Showing {totalCount} shop{totalCount === 1 ? "" : "s"} within 10 km of your location.
@@ -399,118 +347,209 @@ function ShopsPageInner() {
         </div>
       )}
 
-      {locationStatus && <p className="text-sm text-slate-600">{locationStatus}</p>}
-
-      {/* RESULTS HEADER (count + grid/list toggle) */}
-      {!error && shops.length > 0 && !isNearbyMode && (
-        <div className="flex items-center justify-between">
-          <p className="text-sm text-slate-600">
-            <span className="font-semibold text-slate-900">{totalCount}</span>{" "}
-            shop{totalCount === 1 ? "" : "s"} found
-          </p>
-          <ViewToggle view={view} onChange={setView} />
-        </div>
+      {locationStatus && (
+        <p className="mb-4 text-sm text-slate-600">{locationStatus}</p>
       )}
 
-      {/* RESULTS */}
-      {error ? (
-        <p className="rounded-lg border border-rose-200 bg-rose-50 p-6 text-center text-sm text-rose-700">
-          {error}
-        </p>
-      ) : loading && shops.length === 0 ? (
-        view === "list" ? <ShopListSkeleton /> : <ShopGridSkeleton />
-      ) : shops.length === 0 ? (
-        <EmptyState
-          hasActiveFilter={hasActiveFilter}
-          isNearbyMode={isNearbyMode}
-          onReset={resetFilters}
-          onClearNearby={clearNearby}
-        />
-      ) : view === "list" ? (
-        <ul className="space-y-4">
-          {shops.map((shop) => (
-            <ShopListRow key={shop.id} shop={shop} href={`/shops/${shop.id}`} />
-          ))}
-        </ul>
-      ) : (
-        <ul className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
-          {shops.map((shop) => (
-            <ShopCard key={shop.id} shop={shop} href={`/shops/${shop.id}`} />
-          ))}
-        </ul>
+      {/* MOBILE FILTERS TOGGLE — sidebar is full-width on mobile, hidden by default. */}
+      {!isNearbyMode && (
+        <button
+          type="button"
+          onClick={() => setMobileFiltersOpen((v) => !v)}
+          aria-expanded={mobileFiltersOpen}
+          className="mb-3 inline-flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-medium text-slate-700 shadow-sm hover:bg-slate-50 lg:hidden"
+        >
+          <SlidersHorizontal size={16} />
+          Filters
+          {activeFilterCount > 0 && (
+            <span className="inline-flex h-5 min-w-[20px] items-center justify-center rounded-full bg-brand-600 px-1.5 text-[11px] font-semibold text-white">
+              {activeFilterCount}
+            </span>
+          )}
+        </button>
       )}
 
-      {showPagination && (
-        <Pagination
-          page={page}
-          pageSize={PAGE_SIZE}
-          total={totalCount}
-          onPageChange={(next) => {
-            setPage(next);
-            if (typeof window !== "undefined") {
-              window.scrollTo({ top: 0, behavior: "smooth" });
-            }
-          }}
-          unitLabel="shops"
-        />
-      )}
+      {/* MAIN GRID: sidebar + results */}
+      <div className="grid gap-6 lg:grid-cols-[260px_1fr]">
+        {/* SIDEBAR */}
+        {!isNearbyMode && (
+          <aside
+            className={`${
+              mobileFiltersOpen ? "block" : "hidden"
+            } lg:block`}
+          >
+            <FilterSidebar
+              query={query}
+              onQueryChange={setQuery}
+              bookingDate={bookingDate}
+              onBookingDateChange={setBookingDate}
+              guests={guests}
+              onGuestsChange={setGuests}
+              city={city}
+              onCityChange={setCity}
+              cities={cities}
+              categories={categories}
+              selectedCategories={selectedCategories}
+              onToggleCategory={toggleCategory}
+              minRating={minRating}
+              onMinRatingChange={setMinRating}
+              canReset={hasActiveFilter}
+              onReset={resetFilters}
+              onApply={() => {
+                setMobileFiltersOpen(false);
+                loadAll();
+              }}
+            />
+          </aside>
+        )}
+
+        {/* MAIN */}
+        <main className="min-w-0 space-y-4">
+          {/* RESULTS HEADER (count + sort + grid/list toggle) */}
+          {!error && !isNearbyMode && (
+            <div className="flex flex-col gap-3 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm sm:flex-row sm:items-center sm:justify-between">
+              <p className="text-sm text-slate-600">
+                <span className="font-semibold text-slate-900">{totalCount}</span>{" "}
+                shop{totalCount === 1 ? "" : "s"} found
+              </p>
+              <div className="flex items-center gap-3">
+                <label className="flex items-center gap-2 text-sm text-slate-600">
+                  <span className="text-slate-500">Sort by</span>
+                  <div className="relative">
+                    <select
+                      value={sort}
+                      onChange={(e) => setSort(e.target.value)}
+                      aria-label="Sort shops"
+                      className="appearance-none rounded-lg border border-slate-200 bg-white py-1.5 pl-3 pr-8 text-sm font-medium text-slate-900 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+                    >
+                      {SORT_OPTIONS.map((o) => (
+                        <option key={o.value || "recommended"} value={o.value}>
+                          {o.label}
+                        </option>
+                      ))}
+                    </select>
+                    <ChevronDown
+                      size={14}
+                      className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 text-slate-400"
+                    />
+                  </div>
+                </label>
+                <ViewToggle view={view} onChange={setView} />
+              </div>
+            </div>
+          )}
+
+          {/* RESULTS */}
+          {error ? (
+            <p className="rounded-lg border border-rose-200 bg-rose-50 p-6 text-center text-sm text-rose-700">
+              {error}
+            </p>
+          ) : loading && shops.length === 0 ? (
+            view === "list" ? <ShopListSkeleton /> : <ShopGridSkeleton />
+          ) : shops.length === 0 ? (
+            <EmptyState
+              hasActiveFilter={hasActiveFilter}
+              isNearbyMode={isNearbyMode}
+              onReset={resetFilters}
+              onClearNearby={clearNearby}
+            />
+          ) : view === "list" ? (
+            <ul className="space-y-4">
+              {shops.map((shop) => (
+                <ShopListRow key={shop.id} shop={shop} href={`/shops/${shop.id}`} />
+              ))}
+            </ul>
+          ) : (
+            <ul className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
+              {shops.map((shop) => (
+                <ShopCard key={shop.id} shop={shop} href={`/shops/${shop.id}`} />
+              ))}
+            </ul>
+          )}
+
+          {showPagination && (
+            <Pagination
+              page={page}
+              pageSize={PAGE_SIZE}
+              total={totalCount}
+              onPageChange={(next) => {
+                setPage(next);
+                if (typeof window !== "undefined") {
+                  window.scrollTo({ top: 0, behavior: "smooth" });
+                }
+              }}
+              unitLabel="shops"
+            />
+          )}
+        </main>
+      </div>
     </div>
   );
 }
 
 /* ----------------------------------------------------------------------------
- * Primary filter bar — unified pill with Shop name | Booking date | City | Search.
+ * Left-rail filter sidebar.
+ *
+ * All sections are visible at once (no accordions): the filters are short
+ * enough that hiding them just creates an extra click. A single solid Apply
+ * button forces a fresh fetch — useful on mobile where the auto-applied URL
+ * sync isn't visible — and a Reset link clears everything.
  * ------------------------------------------------------------------------- */
 
-function FilterBar({
+function FilterSidebar({
   query,
   onQueryChange,
-  city,
-  onCityChange,
-  cities,
   bookingDate,
   onBookingDateChange,
   guests,
   onGuestsChange,
-  onSubmit,
+  city,
+  onCityChange,
+  cities,
+  categories,
+  selectedCategories,
+  onToggleCategory,
+  minRating,
+  onMinRatingChange,
+  canReset,
+  onReset,
+  onApply,
 }: {
   query: string;
   onQueryChange: (v: string) => void;
-  city: string;
-  onCityChange: (v: string) => void;
-  cities: string[];
   bookingDate: string;
   onBookingDateChange: (v: string) => void;
   guests: number;
   onGuestsChange: (n: number) => void;
-  onSubmit: () => void;
+  city: string;
+  onCityChange: (v: string) => void;
+  cities: string[];
+  categories: ShopCategory[];
+  selectedCategories: number[];
+  onToggleCategory: (id: number) => void;
+  minRating: string;
+  onMinRatingChange: (v: string) => void;
+  canReset: boolean;
+  onReset: () => void;
+  onApply: () => void;
 }) {
   const minDate = todayIso();
-  // The select-chevron SVG is inlined so the select doesn't lose its arrow
-  // when `appearance-none` strips the native one. Hex `94a3b8` = slate-400.
-  const selectChevronBg =
-    "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>\")";
-  const guestsLabel = guests === 1 ? "1 guest" : `${guests} guests`;
   return (
-    <form
-      onSubmit={(e) => {
-        e.preventDefault();
-        onSubmit();
-      }}
-      className="rounded-2xl border border-slate-200 bg-white p-2 shadow-sm"
-    >
-      <div className="flex flex-col gap-2 lg:flex-row lg:items-stretch">
-        <Segment
-          icon={<Store size={18} className="text-brand-600" />}
-          label="Shop name"
-          className="lg:flex-[1.4]"
-        >
+    <div className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm lg:sticky lg:top-4">
+      <h2 className="mb-4 text-lg font-semibold text-slate-900">Filters</h2>
+
+      <FilterSection icon={Store} label="Shop name">
+        <div className="relative">
+          <Search
+            size={14}
+            className="pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-slate-400"
+          />
           <input
             value={query}
             onChange={(e) => onQueryChange(e.target.value)}
             placeholder="Search shop name"
             aria-label="Search shops"
-            className="h-6 w-full border-0 bg-transparent p-0 text-sm leading-6 text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-0"
+            className="h-10 w-full rounded-lg border border-slate-200 bg-white pl-9 pr-8 text-sm text-slate-900 placeholder:text-slate-400 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
           />
           {query && (
             <button
@@ -522,309 +561,158 @@ function FilterBar({
               <X size={14} />
             </button>
           )}
-        </Segment>
-
-        <Segment
-          icon={<Calendar size={18} className="text-brand-600" />}
-          label="When"
-          className="lg:flex-[1.4] lg:border-l lg:border-slate-200"
-        >
-          <input
-            type="date"
-            value={bookingDate}
-            min={minDate}
-            onChange={(e) => onBookingDateChange(e.target.value)}
-            aria-label="Booking date"
-            className={`h-6 w-full border-0 bg-transparent p-0 text-sm leading-6 focus:outline-none focus:ring-0 ${
-              bookingDate ? "text-slate-900" : "text-slate-400"
-            }`}
-          />
-        </Segment>
-
-        <Segment
-          icon={<MapPin size={18} className="text-brand-600" />}
-          label="City"
-          className="lg:flex-1 lg:border-l lg:border-slate-200"
-        >
-          <select
-            value={city}
-            onChange={(e) => onCityChange(e.target.value)}
-            aria-label="Filter by city"
-            className={`h-6 w-full appearance-none border-0 bg-transparent bg-[length:14px] bg-[right_center] bg-no-repeat p-0 pr-6 text-sm leading-6 focus:outline-none focus:ring-0 ${
-              city ? "text-slate-900" : "text-slate-400"
-            }`}
-            style={{ backgroundImage: selectChevronBg }}
-          >
-            <option value="">All cities</option>
-            {cities.map((c) => (
-              <option key={c} value={c}>
-                {c}
-              </option>
-            ))}
-          </select>
-        </Segment>
-
-        <Segment
-          icon={<Users size={18} className="text-brand-600" />}
-          label="Guests"
-          className="lg:flex-[0.85] lg:border-l lg:border-slate-200"
-        >
-          <select
-            value={guests}
-            onChange={(e) => onGuestsChange(Number(e.target.value))}
-            aria-label="Number of guests"
-            className="h-6 w-full appearance-none border-0 bg-transparent bg-[length:14px] bg-[right_center] bg-no-repeat p-0 pr-6 text-sm leading-6 text-slate-900 focus:outline-none focus:ring-0"
-            style={{ backgroundImage: selectChevronBg }}
-          >
-            {Array.from({ length: 8 }, (_, i) => i + 1).map((n) => (
-              <option key={n} value={n}>
-                {n === 1 ? "1 guest" : `${n} guests`}
-              </option>
-            ))}
-          </select>
-          <span className="sr-only">{guestsLabel}</span>
-        </Segment>
-
-        <button
-          type="submit"
-          className="mt-1 inline-flex h-[52px] items-center justify-center gap-2 rounded-xl bg-brand-600 px-6 text-sm font-semibold text-white shadow-sm transition hover:bg-brand-700 lg:ml-1 lg:mt-0 lg:min-w-[130px]"
-        >
-          <Search size={18} />
-          Search
-        </button>
-      </div>
-    </form>
-  );
-}
-
-function Segment({
-  icon,
-  label,
-  children,
-  className = "",
-}: {
-  icon: React.ReactNode;
-  label: string;
-  children: React.ReactNode;
-  className?: string;
-}) {
-  // `relative` so an absolutely-positioned clear button (X icon) can dock
-  // to the segment's right edge regardless of which input it wraps.
-  return (
-    <div
-      className={`relative flex min-w-0 items-center gap-3 rounded-xl px-4 py-2.5 transition focus-within:bg-brand-50/40 ${className}`}
-    >
-      <span className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-lg bg-brand-50">
-        {icon}
-      </span>
-      <div className="min-w-0 flex-1">
-        <span className="mb-0.5 block text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-          {label}
-        </span>
-        {children}
-      </div>
-    </div>
-  );
-}
-
-/* ----------------------------------------------------------------------------
- * Secondary row: Sort / More filters / Reset
- * ------------------------------------------------------------------------- */
-
-function FilterControls({
-  sort,
-  onSortChange,
-  showMoreFilters,
-  onToggleMoreFilters,
-  moreFiltersCount,
-  canReset,
-  onReset,
-}: {
-  sort: string;
-  onSortChange: (v: string) => void;
-  showMoreFilters: boolean;
-  onToggleMoreFilters: () => void;
-  moreFiltersCount: number;
-  canReset: boolean;
-  onReset: () => void;
-}) {
-  return (
-    <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-white px-4 py-2.5 shadow-sm">
-      <div className="flex flex-wrap items-center gap-2">
-        <label className="flex items-center gap-2 text-sm text-slate-600">
-          <span className="font-medium text-slate-700">Sort by:</span>
-          <div className="relative">
-            <select
-              value={sort}
-              onChange={(e) => onSortChange(e.target.value)}
-              aria-label="Sort shops"
-              className="appearance-none rounded-md border border-transparent bg-transparent py-1 pl-1 pr-6 text-sm font-medium text-slate-900 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
-            >
-              {SORT_OPTIONS.map((o) => (
-                <option key={o.value || "recommended"} value={o.value}>
-                  {o.label}
-                </option>
-              ))}
-            </select>
-            <ChevronDown
-              size={14}
-              className="pointer-events-none absolute right-1 top-1/2 -translate-y-1/2 text-slate-400"
-            />
-          </div>
-        </label>
-
-        <button
-          type="button"
-          onClick={onToggleMoreFilters}
-          aria-expanded={showMoreFilters}
-          className={`inline-flex items-center gap-1.5 rounded-md border px-2.5 py-1.5 text-sm font-medium transition ${
-            showMoreFilters
-              ? "border-brand-500 bg-brand-50 text-brand-700"
-              : "border-slate-200 text-slate-700 hover:bg-slate-50"
-          }`}
-        >
-          <SlidersHorizontal size={14} />
-          More filters
-          {moreFiltersCount > 0 && (
-            <span className="ml-0.5 inline-flex h-4 min-w-[16px] items-center justify-center rounded-full bg-brand-600 px-1 text-[10px] font-semibold text-white">
-              {moreFiltersCount}
-            </span>
-          )}
-        </button>
-      </div>
-
-      <button
-        type="button"
-        onClick={onReset}
-        disabled={!canReset}
-        className="inline-flex items-center gap-1.5 text-sm font-medium text-slate-500 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
-      >
-        <RotateCcw size={14} />
-        Reset filters
-      </button>
-    </div>
-  );
-}
-
-/* ----------------------------------------------------------------------------
- * Expandable "More filters" panel — categories chips + min rating.
- * ------------------------------------------------------------------------- */
-
-function MoreFiltersPanel({
-  categories,
-  selectedCategories,
-  onToggleCategory,
-  onClearCategories,
-  minRating,
-  onMinRatingChange,
-}: {
-  categories: ShopCategory[];
-  selectedCategories: number[];
-  onToggleCategory: (id: number) => void;
-  onClearCategories: () => void;
-  minRating: string;
-  onMinRatingChange: (v: string) => void;
-}) {
-  return (
-    <div className="space-y-4 rounded-xl border border-slate-200 bg-white p-4 shadow-sm">
-      {/* Categories */}
-      <div>
-        <div className="mb-2 flex items-center justify-between">
-          <span className="text-xs font-semibold uppercase tracking-wide text-slate-500">
-            Categories
-          </span>
-          {selectedCategories.length > 0 && (
-            <button
-              type="button"
-              onClick={onClearCategories}
-              className="text-xs font-medium text-slate-500 hover:text-slate-700"
-            >
-              Clear ({selectedCategories.length})
-            </button>
-          )}
         </div>
+      </FilterSection>
+
+      <FilterSection icon={Calendar} label="When">
+        <input
+          type="date"
+          value={bookingDate}
+          min={minDate}
+          onChange={(e) => onBookingDateChange(e.target.value)}
+          aria-label="Booking date"
+          className={`h-10 w-full rounded-lg border border-slate-200 bg-white px-3 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 ${
+            bookingDate ? "text-slate-900" : "text-slate-400"
+          }`}
+        />
+      </FilterSection>
+
+      <FilterSection icon={Users} label="Guests">
+        <select
+          value={guests}
+          onChange={(e) => onGuestsChange(Number(e.target.value))}
+          aria-label="Number of guests"
+          className="h-10 w-full appearance-none rounded-lg border border-slate-200 bg-white px-3 pr-8 text-sm text-slate-900 focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500"
+          style={{
+            backgroundImage:
+              "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>\")",
+            backgroundRepeat: "no-repeat",
+            backgroundPosition: "right 12px center",
+            backgroundSize: "12px",
+          }}
+        >
+          {Array.from({ length: 8 }, (_, i) => i + 1).map((n) => (
+            <option key={n} value={n}>
+              {n === 1 ? "1 guest" : `${n} guests`}
+            </option>
+          ))}
+        </select>
+      </FilterSection>
+
+      <FilterSection icon={MapPin} label="City">
+        <select
+          value={city}
+          onChange={(e) => onCityChange(e.target.value)}
+          aria-label="Filter by city"
+          className={`h-10 w-full appearance-none rounded-lg border border-slate-200 bg-white px-3 pr-8 text-sm focus:border-brand-500 focus:outline-none focus:ring-1 focus:ring-brand-500 ${
+            city ? "text-slate-900" : "text-slate-400"
+          }`}
+          style={{
+            backgroundImage:
+              "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%2394a3b8' stroke-width='2.5' stroke-linecap='round' stroke-linejoin='round'><polyline points='6 9 12 15 18 9'/></svg>\")",
+            backgroundRepeat: "no-repeat",
+            backgroundPosition: "right 12px center",
+            backgroundSize: "12px",
+          }}
+        >
+          <option value="">All cities</option>
+          {cities.map((c) => (
+            <option key={c} value={c}>
+              {c}
+            </option>
+          ))}
+        </select>
+      </FilterSection>
+
+      <FilterSection icon={Tag} label="Category">
         {categories.length === 0 ? (
           <p className="text-sm text-slate-400">No categories available.</p>
         ) : (
-          <div className="flex flex-wrap gap-2">
+          <ul className="space-y-2">
             {categories.map((c) => {
               const active = selectedCategories.includes(c.id);
               return (
-                <button
-                  key={c.id}
-                  type="button"
-                  onClick={() => onToggleCategory(c.id)}
-                  aria-pressed={active}
-                  className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
-                    active
-                      ? "border-brand-600 bg-brand-600 text-white"
-                      : "border-slate-200 bg-white text-slate-700 hover:border-brand-300 hover:bg-brand-50"
-                  }`}
-                >
-                  {c.name}
-                </button>
+                <li key={c.id}>
+                  <label className="flex cursor-pointer items-center gap-2.5 text-sm text-slate-700">
+                    <input
+                      type="checkbox"
+                      checked={active}
+                      onChange={() => onToggleCategory(c.id)}
+                      className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                    />
+                    <span>{c.name}</span>
+                  </label>
+                </li>
               );
             })}
-          </div>
+          </ul>
         )}
-      </div>
+      </FilterSection>
 
-      {/* Minimum rating */}
-      <div>
-        <span className="mb-2 block text-xs font-semibold uppercase tracking-wide text-slate-500">
-          Minimum rating
-        </span>
-        <div className="flex flex-wrap gap-2">
-          <RatingChip
-            label="Any"
-            active={!minRating}
-            onClick={() => onMinRatingChange("")}
-          />
-          {RATING_OPTIONS.map((o) => (
-            <RatingChip
-              key={o.value}
-              label={o.label}
-              active={minRating === o.value}
-              onClick={() => onMinRatingChange(o.value)}
-              showStar
-            />
-          ))}
-        </div>
+      <FilterSection icon={Star} label="Rating" last>
+        <ul className="space-y-2">
+          {RATING_OPTIONS.map((o) => {
+            const active = minRating === o.value;
+            return (
+              <li key={o.value}>
+                <label className="flex cursor-pointer items-center gap-2.5 text-sm text-slate-700">
+                  <input
+                    type="checkbox"
+                    checked={active}
+                    onChange={() => onMinRatingChange(active ? "" : o.value)}
+                    className="h-4 w-4 rounded border-slate-300 text-brand-600 focus:ring-brand-500"
+                  />
+                  <span className="inline-flex items-center gap-1">
+                    {o.label}
+                  </span>
+                </label>
+              </li>
+            );
+          })}
+        </ul>
+      </FilterSection>
+
+      <div className="mt-5 space-y-2">
+        <button
+          type="button"
+          onClick={onApply}
+          className="w-full rounded-lg bg-brand-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm hover:bg-brand-700"
+        >
+          Apply filters
+        </button>
+        <button
+          type="button"
+          onClick={onReset}
+          disabled={!canReset}
+          className="inline-flex w-full items-center justify-center gap-2 rounded-lg border border-slate-200 px-4 py-2.5 text-sm font-medium text-slate-600 hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          <RotateCcw size={14} />
+          Reset
+        </button>
       </div>
     </div>
   );
 }
 
-function RatingChip({
+function FilterSection({
+  icon: Icon,
   label,
-  active,
-  onClick,
-  showStar = false,
+  last = false,
+  children,
 }: {
+  icon: typeof Store;
   label: string;
-  active: boolean;
-  onClick: () => void;
-  showStar?: boolean;
+  last?: boolean;
+  children: React.ReactNode;
 }) {
   return (
-    <button
-      type="button"
-      onClick={onClick}
-      aria-pressed={active}
-      className={`inline-flex items-center gap-1 rounded-full border px-3 py-1.5 text-xs font-medium transition ${
-        active
-          ? "border-brand-600 bg-brand-600 text-white"
-          : "border-slate-200 bg-white text-slate-700 hover:border-brand-300 hover:bg-brand-50"
-      }`}
-    >
-      {showStar && (
-        <Star
-          size={12}
-          className={active ? "fill-white text-white" : "fill-amber-400 text-amber-400"}
-        />
-      )}
-      {label}
-    </button>
+    <div className={last ? "" : "mb-4"}>
+      <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-slate-800">
+        <Icon size={14} className="text-brand-600" />
+        {label}
+      </div>
+      {children}
+    </div>
   );
 }
 
@@ -880,7 +768,7 @@ function ToggleButton({
       onClick={onClick}
       aria-label={label}
       aria-pressed={active}
-      className={`inline-flex h-7 w-7 items-center justify-center rounded-md ${
+      className={`inline-flex h-8 w-8 items-center justify-center rounded-md ${
         active ? "bg-brand-600 text-white" : "text-slate-500 hover:bg-slate-100"
       }`}
     >
@@ -895,7 +783,7 @@ function ToggleButton({
 
 function ShopGridSkeleton() {
   return (
-    <ul className="grid gap-6 sm:grid-cols-2 lg:grid-cols-3">
+    <ul className="grid gap-5 sm:grid-cols-2 xl:grid-cols-3">
       {Array.from({ length: 6 }).map((_, i) => (
         <li
           key={i}
