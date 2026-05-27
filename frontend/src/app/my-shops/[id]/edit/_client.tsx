@@ -321,6 +321,27 @@ export default function EditShopPage() {
     setToast({ variant: "success", message: "Coordinates updated from map pin." });
   }
 
+  function pasteCoordinates(text: string) {
+    const coords = parseCoordinatePair(text);
+    if (!coords) {
+      setToast({
+        variant: "error",
+        message: "Couldn't read those coordinates. Paste like “8.2414, 124.2470”.",
+      });
+      return;
+    }
+    setForm((prev) =>
+      prev
+        ? {
+            ...prev,
+            latitude: coords.lat.toFixed(6),
+            longitude: coords.lng.toFixed(6),
+          }
+        : prev
+    );
+    setToast({ variant: "success", message: "Coordinates pasted from Google Maps." });
+  }
+
   const statusPill = (
     <span
       className={`inline-flex items-center gap-1.5 self-start rounded-full px-2.5 py-1 text-xs font-medium ${
@@ -533,6 +554,7 @@ export default function EditShopPage() {
             canGeocode={canGeocode}
             geocodeFromAddress={geocodeFromAddress}
             applyPin={applyPin}
+            pasteCoordinates={pasteCoordinates}
           />
 
           {/* 4. CONTACT */}
@@ -722,6 +744,52 @@ function IconInput({
 }
 
 /**
+ * Build a Google Maps URL that pre-locates the shop so the owner can pan/zoom
+ * to the exact spot and right-click → copy coordinates. Prefers a typed
+ * address; falls back to existing coords; finally bare Maps.
+ */
+function googleMapsHrefFor(form: FormValues): string {
+  const query = [
+    form.address_line,
+    form.address_line_2,
+    form.barangay,
+    form.city,
+    form.state_province,
+    form.postal_code,
+    form.country,
+  ]
+    .map((s) => s.trim())
+    .filter(Boolean)
+    .join(", ");
+  if (query) {
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(query)}`;
+  }
+  const lat = parseFloat(form.latitude);
+  const lng = parseFloat(form.longitude);
+  if (Number.isFinite(lat) && Number.isFinite(lng)) {
+    return `https://www.google.com/maps?q=${lat},${lng}`;
+  }
+  return "https://www.google.com/maps";
+}
+
+/**
+ * Parses pasted text like "8.2414, 124.2470" (Google Maps "What's here?"
+ * format) or "8.2414 124.2470". Returns null if it isn't a valid decimal
+ * lat/lng pair within Earth bounds. DMS strings aren't supported.
+ */
+function parseCoordinatePair(input: string): { lat: number; lng: number } | null {
+  const match = input
+    .trim()
+    .match(/^(-?\d+(?:\.\d+)?)\s*[,\s]\s*(-?\d+(?:\.\d+)?)$/);
+  if (!match) return null;
+  const lat = parseFloat(match[1]);
+  const lng = parseFloat(match[2]);
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null;
+  if (lat < -90 || lat > 90 || lng < -180 || lng > 180) return null;
+  return { lat, lng };
+}
+
+/**
  * Location section — title at the top, then a 2-column layout (form fields
  * on the left, interactive map on the right). Matches the new mockup; uses
  * the same rounded-2xl/border styling as the FormSection-based sections.
@@ -733,6 +801,7 @@ function LocationFormSection({
   canGeocode,
   geocodeFromAddress,
   applyPin,
+  pasteCoordinates,
 }: {
   form: FormValues;
   update: <K extends keyof FormValues>(k: K, v: FormValues[K]) => void;
@@ -740,6 +809,7 @@ function LocationFormSection({
   canGeocode: boolean;
   geocodeFromAddress: () => Promise<void>;
   applyPin: (result: PinResult) => void;
+  pasteCoordinates: (text: string) => void;
 }) {
   return (
     <section className="rounded-2xl border border-slate-200 bg-white p-5 sm:p-6">
@@ -816,19 +886,32 @@ function LocationFormSection({
           </div>
 
           <div>
-            <div className="mb-1 flex items-center justify-between">
+            <div className="mb-1 flex flex-wrap items-center justify-between gap-2">
               <span className="block text-sm font-medium text-slate-700">
                 Coordinates{" "}
                 <span className="font-normal text-slate-500">(optional)</span>
               </span>
-              <button
-                type="button"
-                onClick={geocodeFromAddress}
-                disabled={!canGeocode}
-                className="text-xs font-medium text-brand-600 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
-              >
-                Use address coordinates
-              </button>
+              <div className="flex items-center gap-3">
+                <button
+                  type="button"
+                  onClick={geocodeFromAddress}
+                  disabled={!canGeocode}
+                  className="text-xs font-medium text-brand-600 hover:text-brand-700 disabled:cursor-not-allowed disabled:opacity-50"
+                >
+                  Use address coordinates
+                </button>
+                <span className="text-slate-300" aria-hidden>
+                  ·
+                </span>
+                <a
+                  href={googleMapsHrefFor(form)}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="text-xs font-medium text-brand-600 hover:text-brand-700"
+                >
+                  Find on Google Maps ↗
+                </a>
+              </div>
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
               <Field label="Latitude">
@@ -852,8 +935,10 @@ function LocationFormSection({
                 />
               </Field>
             </div>
+            <PasteCoordinatesInput onPaste={pasteCoordinates} />
             <p className="mt-1.5 text-xs text-slate-500">
-              Leave blank to auto-capture from the map pin.
+              Leave blank to auto-capture from the map pin, or open Google Maps,
+              right-click your spot, and paste the coordinates above.
             </p>
           </div>
         </div>
@@ -868,6 +953,32 @@ function LocationFormSection({
         </div>
       </div>
     </section>
+  );
+}
+
+/**
+ * Small input for pasting "lat, lng" from Google Maps in one shot. Parses on
+ * change so a clipboard paste fills both lat/lng fields immediately; the
+ * input clears itself on success.
+ */
+function PasteCoordinatesInput({ onPaste }: { onPaste: (text: string) => void }) {
+  const [value, setValue] = useState("");
+  function handleChange(next: string) {
+    setValue(next);
+    if (parseCoordinatePair(next)) {
+      onPaste(next);
+      setValue("");
+    }
+  }
+  return (
+    <input
+      type="text"
+      value={value}
+      onChange={(e) => handleChange(e.target.value)}
+      placeholder="Paste coordinates from Google Maps (e.g. 8.2414, 124.2470)"
+      aria-label="Paste coordinates from Google Maps"
+      className={`${inputClasses} mt-2`}
+    />
   );
 }
 
