@@ -708,17 +708,17 @@ Then wire the outputs into GitHub Environments (Settings → Environments → st
 
 Domain registered at [dot.ph](https://www.dot.ph). dot.ph stays the *registrar*; we delegate DNS to Route 53. One zone, one nameserver change, then it's all Terraform.
 
-**Live state (as of 2026-05-18):**
+**Live state (as of 2026-06-01):**
 
 | Fact | Value |
 |---|---|
 | Registered domain | `bookme.ph` (dot.ph; registered 2026-05-19, expires 2027-05-19, auto-renew **off**) |
 | Route 53 zone ID | `Z0098224309DW9ENSZFXV` (the `dns` layer — **applied**) |
 | AWS nameservers | `ns-1114.awsdns-11.org`, `ns-1747.awsdns-26.co.uk`, `ns-339.awsdns-42.com`, `ns-849.awsdns-42.net` |
-| Cutover status | ✅ **Live (verified 2026-05-18).** dot.ph set to "Own Nameservers" (the 4 above); delegation propagated; ACM cert for `staging.bookme.ph` = ISSUED; `https://staging.bookme.ph` serves the app over valid TLS. `dx1epgde94eqq.cloudfront.net` still works (kept in CORS). |
-| Prod (`bookme.ph` + `www.bookme.ph`) | Wired in code, **not applied** — no prod backend stack exists yet. Reuses this same zone (no second nameserver change). |
+| Stage | **Live (verified 2026-05-18).** `https://staging.bookme.ph` serves the app over valid TLS. `dx1epgde94eqq.cloudfront.net` still works (kept in CORS). |
+| Prod | **Live (verified 2026-06-01).** Both `https://bookme.ph` and `https://www.bookme.ph` serve the prod CloudFront distribution over valid TLS; no apex→www (or reverse) redirect — both hostnames are CloudFront aliases. Same zone, no second nameserver change. |
 
-Keep this table current when the cutover completes (flip the status to ✅) or if the zone is ever recreated (nameservers change on recreate).
+Keep this table current if the zone is ever recreated (nameservers change on recreate) or if either env's frontend distribution is replaced.
 
 ```bash
 # (1) Create the single bookme.ph hosted zone (stage account).
@@ -818,11 +818,12 @@ You'll need to **empty the media S3 bucket first** (it has `force_destroy = true
 ### IAM
 
 - **Task execution role** (per service, named `role-<service>-task-exec`)
-  - Pulls images from ECR (`AmazonECSTaskExecutionRolePolicy` managed)
-  - Reads SSM params (`AmazonSSMReadOnlyAccess` managed) — this is broad; tighten to `/reservation/*` for prod
+  - Pulls images from ECR + ships logs (`AmazonECSTaskExecutionRolePolicy` managed)
+  - Reads SSM params via a scoped inline policy — `ssm:GetParameter(s)[ByPath]` restricted to `arn:aws:ssm:<region>:<acct>:parameter/${project}/${env}/*` (so a stage exec role can't read prod params, and vice versa, in this single-account model)
+  - Decrypts SecureString values via inline `kms:Decrypt` gated by `kms:ViaService = ssm.<region>.amazonaws.com` — only the SSM-mediated secret-injection path works, no direct KMS access. See `task_exec_iam_statements` in [aws/layers/ecs/main.tf](layers/ecs/main.tf). The AWS-managed `AmazonSSMReadOnlyAccess` policy that older revisions attached has been removed.
 - **Task IAM role** (per service, named `role-<service>-task`)
   - What your *running* app code can do via AWS SDK
-  - Default: scoped to `/reservation/*` SSM paths and KMS decrypt (via `tasks_iam_role_statements` in region.hcl)
+  - Default: scoped to `/reservation/*` SSM paths and KMS decrypt (via `tasks_iam_role_statements` in region.hcl), plus S3 object access to the media bucket only
 
 ### Secrets at rest
 
@@ -838,10 +839,10 @@ You'll need to **empty the media S3 bucket first** (it has `force_destroy = true
 
 ### What's not yet hardened
 
-- No WAF (the `cloudfront` layer pulls one in when you add a domain).
+- No WAF on either CloudFront distribution.
 - No GuardDuty / SecurityHub / Config — turn these on at the account level outside this Terraform.
 - No KMS CMKs — defaults to AWS-managed keys.
-- ECR repos don't enforce image tag immutability (`MUTABLE`). Flip to `IMMUTABLE` and switch deploys to SHA tags for prod.
+- ECR image-tag immutability is **enabled on prod** (`image_tag_mutability = "IMMUTABLE"` in [prod region.hcl](accounts/prod/ap-southeast-1/region.hcl)) so any pushed SHA tag — and the bootstrap `:latest` — is write-once and cannot be silently overwritten. Stage stays MUTABLE because CI re-pushes `:latest` on every staging deploy alongside the SHA tag.
 
 ---
 
