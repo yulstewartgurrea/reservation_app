@@ -25,7 +25,13 @@ CHANNEL_LAYERS = {
 # override_settings. (None rate => AnonRateThrottle allows every request.)
 REST_FRAMEWORK = {
     **REST_FRAMEWORK,  # noqa: F405
-    "DEFAULT_THROTTLE_RATES": {"login": None, "register": None, "password_reset": None},
+    "DEFAULT_THROTTLE_RATES": {
+        "login": None,
+        "register": None,
+        "password_reset": None,
+        "support_ticket_create": None,
+        "support_message_create": None,
+    },
 }
 
 CELERY_TASK_ALWAYS_EAGER = True

@@ -4,9 +4,11 @@ import Link from "next/link";
 import Image from "next/image";
 import { useEffect } from "react";
 import { useAuth } from "@/lib/auth";
+import { AdminTicketsNavLink } from "./AdminTicketsNavLink";
 import { Avatar } from "./Avatar";
 import { ChatBadge } from "./ChatBadge";
 import { NotificationBell } from "./NotificationBell";
+import { SupportNavLink } from "./SupportNavLink";
 
 export function TopNav() {
   const { user, fetchMe, logout } = useAuth();
@@ -18,7 +20,7 @@ export function TopNav() {
   return (
     <header className="sticky top-0 z-30 border-b border-slate-200 bg-white/90 backdrop-blur">
       <div className="mx-auto flex max-w-6xl items-center justify-between px-4 py-3 sm:px-6 lg:px-8">
-        <Link href="/shops" aria-label="Browse shops" className="flex items-center">
+        <Link href="/" aria-label="BookMe home" className="flex items-center">
           <Image
             src="/logo.png"
             alt="BookMe"
@@ -58,6 +60,10 @@ export function TopNav() {
                   Admin
                 </Link>
               )}
+              {(user.role === "customer" || user.role === "shop_owner") && (
+                <SupportNavLink />
+              )}
+              {user.role === "admin" && <AdminTicketsNavLink />}
               <ChatBadge />
               <NotificationBell />
               {user.role === "customer" && (

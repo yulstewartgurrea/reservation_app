@@ -63,20 +63,9 @@ type StagedPhoto = { id: string; file: File; preview: string };
 const DESCRIPTION_MAX = 500;
 const MAX_PHOTOS = 8;
 
-const COUNTRIES = [
-  "Philippines",
-  "United States",
-  "United Kingdom",
-  "Singapore",
-  "Japan",
-  "Australia",
-  "Canada",
-  "Hong Kong",
-  "Malaysia",
-  "Indonesia",
-  "Thailand",
-  "Vietnam",
-];
+// Pilot phase: only Philippines is selectable; the backend locations API is
+// also scoped to Iligan (see LOCATIONS_RESTRICT_TO_ILIGAN).
+const COUNTRIES = ["Philippines"];
 
 function toFormValues(d: Partial<Shop>): FormValues {
   return {

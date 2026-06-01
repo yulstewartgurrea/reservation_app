@@ -47,6 +47,7 @@ INSTALLED_APPS = [
     "apps.chat",
     "apps.core",
     "apps.locations",
+    "apps.support",
 ]
 
 MIDDLEWARE = [
@@ -173,6 +174,8 @@ REST_FRAMEWORK = {
         "login": "5/min",
         "register": "5/hour",
         "password_reset": "5/hour",
+        "support_ticket_create": "10/hour",
+        "support_message_create": "30/hour",
     },
     # How many trusted proxies sit in front of the app. Required for IP-based
     # throttling to use the real client IP from X-Forwarded-For rather than the
@@ -273,6 +276,12 @@ LOGGING = {
 }
 
 FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:3000")
+
+# Testing-phase guardrail. While the platform is piloted in a single city,
+# the PSGC dropdowns and shop-form country list are scoped to Iligan only.
+# Set to False (or unset env var to False) to open the locations API and shop
+# forms to all PSGC data and all supported countries.
+LOCATIONS_RESTRICT_TO_ILIGAN = env.bool("LOCATIONS_RESTRICT_TO_ILIGAN", default=True)
 
 DEFAULT_COMMISSION_RATE = env("DEFAULT_COMMISSION_RATE")
 DEFAULT_CANCELLATION_WINDOW_HOURS = env("DEFAULT_CANCELLATION_WINDOW_HOURS")

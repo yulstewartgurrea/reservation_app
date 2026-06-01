@@ -414,6 +414,7 @@ function BookPageInner() {
                 badge="Recommended"
                 onClick={() => setPaymentMethod("pay_on_arrival")}
               />
+              {/* PayMongo online payment temporarily disabled
               <PaymentOption
                 active={paymentMethod === "online"}
                 icon={CreditCard}
@@ -421,6 +422,7 @@ function BookPageInner() {
                 description="Securely pay online now via PayMongo (GCash, GrabPay, Maya, cards, etc.)."
                 onClick={() => setPaymentMethod("online")}
               />
+              */}
             </div>
           </section>
 

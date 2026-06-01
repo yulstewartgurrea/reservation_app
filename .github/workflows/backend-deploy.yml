@@ -1,8 +1,13 @@
 name: Backend deploy
 
+# Branch → environment mapping:
+#   staging → staging
+#   main    → prod
+#
 # Triggers:
 #   - push to staging or main that touches backend/, aws/, or this workflow
-#   - manual workflow_dispatch (with optional image tag override for redeploy/rollback)
+#   - manual workflow_dispatch (with optional image tag override for redeploy/rollback,
+#     and a forced environment so you can deploy prod from a non-main branch in emergencies)
 on:
   push:
     branches: [staging, main]
@@ -12,6 +17,11 @@ on:
       - ".github/workflows/backend-deploy.yml"
   workflow_dispatch:
     inputs:
+      environment:
+        description: "Force deploy to a specific environment"
+        required: true
+        type: choice
+        options: [staging, prod]
       image_tag:
         description: "Image tag to deploy (default: short SHA of HEAD). Use a previous SHA to roll back."
         required: false
@@ -23,15 +33,12 @@ permissions:
 
 env:
   AWS_REGION: ap-southeast-1
-  ECR_REPOSITORY: reservation/stage/api
-  ECS_CLUSTER: ecs-reservation-stage
-  API_SERVICE: svc-ecs-reservation-stage-api
-  WORKER_SERVICE: svc-ecs-reservation-stage-celery-worker
-  BEAT_SERVICE: svc-ecs-reservation-stage-celery-beat
   TF_VERSION: "1.8.5"
   TG_VERSION: "0.55.21"
 
 jobs:
+  # The test job is environment-agnostic — it spins up its own Postgres + Redis
+  # service containers and runs Django tests. It runs once regardless of target env.
   test:
     name: Django tests
     runs-on: ubuntu-latest
@@ -89,11 +96,63 @@ jobs:
           DJANGO_ALLOWED_HOSTS: "*"
         run: python manage.py test --settings=config.test_settings --verbosity=2
 
-  build:
-    name: Build & push image
-    needs: test
+  # Map git ref (or workflow_dispatch input) to a target environment name.
+  # Downstream jobs consume this via `environment: ${{ needs.resolve.outputs.environment }}`
+  # so per-env GitHub Variables (deploy role ARN, etc.) resolve correctly and the
+  # OIDC sub claim matches `repo:OWNER/REPO:environment:<env>`.
+  resolve:
+    name: Resolve target environment
     runs-on: ubuntu-latest
-    environment: staging   # OIDC sub claim becomes ":environment:staging"
+    outputs:
+      environment: ${{ steps.pick.outputs.environment }}
+      ecr_repository: ${{ steps.pick.outputs.ecr_repository }}
+      ecs_cluster: ${{ steps.pick.outputs.ecs_cluster }}
+      api_service: ${{ steps.pick.outputs.api_service }}
+      worker_service: ${{ steps.pick.outputs.worker_service }}
+      beat_service: ${{ steps.pick.outputs.beat_service }}
+      tg_working_dir: ${{ steps.pick.outputs.tg_working_dir }}
+      migrate_family: ${{ steps.pick.outputs.migrate_family }}
+    steps:
+      - id: pick
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            ENV="${{ inputs.environment }}"
+          elif [ "${{ github.ref }}" = "refs/heads/staging" ]; then
+            ENV="staging"
+          elif [ "${{ github.ref }}" = "refs/heads/main" ]; then
+            ENV="prod"
+          else
+            echo "No environment mapping for ref ${{ github.ref }}" >&2
+            exit 1
+          fi
+
+          # The Terragrunt directory + AWS resource names use the short env token
+          # `stage` / `prod`. The GitHub Environment is `staging` / `prod`.
+          case "$ENV" in
+            staging) SHORT="stage" ;;
+            prod)    SHORT="prod"  ;;
+            *) echo "Unsupported env: $ENV" >&2; exit 1 ;;
+          esac
+
+          {
+            echo "environment=$ENV"
+            echo "ecr_repository=reservation/$SHORT/api"
+            echo "ecs_cluster=ecs-reservation-$SHORT"
+            echo "api_service=svc-ecs-reservation-$SHORT-api"
+            echo "worker_service=svc-ecs-reservation-$SHORT-celery-worker"
+            echo "beat_service=svc-ecs-reservation-$SHORT-celery-beat"
+            echo "tg_working_dir=aws/accounts/$SHORT/ap-southeast-1/ecs"
+            echo "migrate_family=migrate-reservation-$SHORT"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Resolved environment=$ENV (short=$SHORT)"
+
+  build:
+    name: Build & push image (${{ needs.resolve.outputs.environment }})
+    needs: [test, resolve]
+    runs-on: ubuntu-latest
+    environment: ${{ needs.resolve.outputs.environment }}   # OIDC sub claim becomes ":environment:<env>"
     outputs:
       image_tag: ${{ steps.tag.outputs.tag }}
     steps:
@@ -126,6 +185,7 @@ jobs:
         working-directory: backend
         env:
           REGISTRY: ${{ steps.ecr.outputs.registry }}
+          ECR_REPOSITORY: ${{ needs.resolve.outputs.ecr_repository }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
@@ -139,6 +199,7 @@ jobs:
       - name: Confirm rollback image exists
         if: github.event.inputs.image_tag != ''
         env:
+          ECR_REPOSITORY: ${{ needs.resolve.outputs.ecr_repository }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           aws ecr describe-images --repository-name "$ECR_REPOSITORY" \
@@ -146,10 +207,10 @@ jobs:
           echo "Found existing image with tag $TAG — rollback proceeding."
 
   migrate:
-    name: Run Django migrations (one-off ECS task)
-    needs: build
+    name: Run Django migrations (${{ needs.resolve.outputs.environment }})
+    needs: [resolve, build]
     runs-on: ubuntu-latest
-    environment: staging
+    environment: ${{ needs.resolve.outputs.environment }}
     steps:
       - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
@@ -160,6 +221,10 @@ jobs:
       - name: Register & run migrate task
         env:
           IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
+          ECR_REPOSITORY: ${{ needs.resolve.outputs.ecr_repository }}
+          ECS_CLUSTER: ${{ needs.resolve.outputs.ecs_cluster }}
+          API_SERVICE: ${{ needs.resolve.outputs.api_service }}
+          MIGRATE_FAMILY: ${{ needs.resolve.outputs.migrate_family }}
         run: |
           set -euo pipefail
 
@@ -177,8 +242,8 @@ jobs:
           NEW_IMAGE="$ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com/$ECR_REPOSITORY:$IMAGE_TAG"
           API_CONTAINER_NAME=$(jq -r '.containerDefinitions[0].name' td.json)
 
-          jq --arg image "$NEW_IMAGE" --arg name "$API_CONTAINER_NAME" '
-            .family = "migrate-reservation-stage" |
+          jq --arg image "$NEW_IMAGE" --arg name "$API_CONTAINER_NAME" --arg family "$MIGRATE_FAMILY" '
+            .family = $family |
             .containerDefinitions = [
               (.containerDefinitions[] | select(.name == $name) | .image = $image
                 | .command = ["sh","-c","python manage.py migrate --noinput && python manage.py seed_categories"]
@@ -230,10 +295,14 @@ jobs:
           echo "Migrations completed successfully."
 
   deploy:
-    name: Roll out ECS services
-    needs: [build, migrate]
+    name: Roll out ECS services (${{ needs.resolve.outputs.environment }})
+    needs: [resolve, build, migrate]
     runs-on: ubuntu-latest
-    environment: staging
+    environment: ${{ needs.resolve.outputs.environment }}
+    # Queue concurrent deploys to the same env; allow different envs to run in parallel.
+    concurrency:
+      group: backend-deploy-${{ needs.resolve.outputs.environment }}
+      cancel-in-progress: false
     steps:
       - uses: actions/checkout@v4
 
@@ -256,13 +325,18 @@ jobs:
           terragrunt --version
 
       - name: Terragrunt apply (ecs layer)
-        working-directory: aws/accounts/stage/ap-southeast-1/ecs
+        working-directory: ${{ needs.resolve.outputs.tg_working_dir }}
         env:
           API_IMAGE_TAG: ${{ needs.build.outputs.image_tag }}
           TERRAGRUNT_NON_INTERACTIVE: "true"
         run: terragrunt apply -auto-approve
 
       - name: Wait for services to stabilize
+        env:
+          ECS_CLUSTER: ${{ needs.resolve.outputs.ecs_cluster }}
+          API_SERVICE: ${{ needs.resolve.outputs.api_service }}
+          WORKER_SERVICE: ${{ needs.resolve.outputs.worker_service }}
+          BEAT_SERVICE: ${{ needs.resolve.outputs.beat_service }}
         run: |
           aws ecs wait services-stable \
             --cluster "$ECS_CLUSTER" \
@@ -270,12 +344,15 @@ jobs:
           echo "All ECS services are stable on tag ${{ needs.build.outputs.image_tag }}"
 
       - name: Summary
+        env:
+          ECS_CLUSTER: ${{ needs.resolve.outputs.ecs_cluster }}
         run: |
           {
             echo "### Deploy summary"
             echo ""
             echo "| Field | Value |"
             echo "|---|---|"
+            echo "| Environment | \`${{ needs.resolve.outputs.environment }}\` |"
             echo "| Image tag | \`${{ needs.build.outputs.image_tag }}\` |"
             echo "| Commit | [${GITHUB_SHA::12}](${{ github.server_url }}/${{ github.repository }}/commit/${GITHUB_SHA}) |"
             echo "| Cluster | $ECS_CLUSTER |"
