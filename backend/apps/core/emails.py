@@ -40,8 +40,12 @@ def send_template_email(
         html_body = render_to_string(html_template, context)
         msg = EmailMultiAlternatives(subject=subject, body=text_body, to=recipients)
         msg.attach_alternative(html_body, "text/html")
-        msg.send()
-        return True
+        sent = msg.send()
+        if sent:
+            logger.info("send_template_email ok to=%s subject=%r", recipients, subject)
+            return True
+        logger.warning("send_template_email returned 0 to=%s subject=%r", recipients, subject)
+        return False
     except Exception as exc:  # noqa: BLE001 — explicit catch-all for outbound email
-        logger.warning("send_template_email failed for %s: %s", recipients, exc)
+        logger.warning("send_template_email failed to=%s subject=%r err=%s", recipients, subject, exc)
         return False

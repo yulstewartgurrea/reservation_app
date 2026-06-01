@@ -1,0 +1,15 @@
+Hi {{ customer_name }},
+
+Your service at {{ shop.name }} is complete. Here's your receipt:
+
+Service: {{ service.name }}
+Completed: {{ start_at|date:"l, F j, Y" }} at {{ start_at|time:"g:i A" }}
+Shop: {{ shop.name }} — {{ shop.address_line }}, {{ shop.city }}
+
+Total paid: PHP {{ total_price }} ({{ payment_label }})
+
+Book again: {{ frontend_url }}/shops/{{ shop.id }}
+
+This email is your receipt — keep it for your records.
+
+— BookMe

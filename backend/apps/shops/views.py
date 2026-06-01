@@ -1,8 +1,12 @@
 import math
+from datetime import datetime
 
-from django.db.models import Q
+from django.db import transaction
+from django.db.models import Avg, Count, Prefetch, Q
+from django.utils import timezone
 from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
+from rest_framework.pagination import PageNumberPagination
 from rest_framework.parsers import FormParser, MultiPartParser
 from rest_framework.response import Response
 
@@ -11,24 +15,28 @@ from apps.accounts.permissions import IsCustomer, IsShopOwner
 from .geocoding import geocode_address
 from .models import (
     Favorite,
+    Category,
     HoursOverride,
+    Resource,
     Shop,
-    ShopCategory,
     ShopPhoto,
     Staff,
     StaffWorkingHours,
+    TimeBlock,
     WeekdayHours,
 )
 from .serializers import (
+    CategorySerializer,
     FavoriteSerializer,
     HoursOverrideSerializer,
-    ShopCategorySerializer,
+    ResourceSerializer,
     ShopDetailSerializer,
     ShopListSerializer,
     ShopPhotoSerializer,
     ShopWriteSerializer,
     StaffSerializer,
     StaffWorkingHoursSerializer,
+    TimeBlockSerializer,
     WeekdayHoursSerializer,
 )
 
@@ -53,17 +61,41 @@ def _haversine_km(lat1, lng1, lat2, lng2) -> float:
     return 2 * r * math.asin(math.sqrt(a))
 
 
-class ShopCategoryViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = ShopCategory.objects.all()
-    serializer_class = ShopCategorySerializer
+class ShopPagination(PageNumberPagination):
+    """Paginator for the public shops list — grid-friendly page size."""
+
+    page_size = 12
+    page_size_query_param = "page_size"
+    max_page_size = 48
+
+
+class CategoryViewSet(viewsets.ReadOnlyModelViewSet):
+    """Public read-only list of the unified category taxonomy."""
+
+    queryset = Category.objects.all()
+    serializer_class = CategorySerializer
     permission_classes = [permissions.AllowAny]
 
 
 class ShopViewSet(viewsets.ModelViewSet):
     queryset = Shop.objects.all()
+    pagination_class = ShopPagination
     filterset_fields = ["status", "city", "categories"]
     search_fields = ["name", "description", "city"]
-    ordering_fields = ["created_at", "name"]
+    # The list action annotates `_avg_rating` / `_reviews_count` onto each
+    # shop (see `get_queryset`); exposing both the public alias and the
+    # underscored column here lets the frontend send the friendlier name
+    # while DRF's OrderingFilter still resolves the rewrite produced in
+    # `filter_queryset`. Frontend ordering strings: `-avg_rating`,
+    # `-reviews_count`, `-created_at`, `name`.
+    ordering_fields = [
+        "created_at",
+        "name",
+        "avg_rating",
+        "reviews_count",
+        "_avg_rating",
+        "_reviews_count",
+    ]
 
     def get_serializer_class(self):
         if self.action == "list":
@@ -73,7 +105,7 @@ class ShopViewSet(viewsets.ModelViewSet):
         return ShopDetailSerializer
 
     def get_permissions(self):
-        if self.action in ("list", "retrieve", "nearby"):
+        if self.action in ("list", "retrieve", "nearby", "cities"):
             return [permissions.AllowAny()]
         if self.action == "create":
             return [IsShopOwner()]
@@ -82,10 +114,155 @@ class ShopViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         qs = super().get_queryset()
         if self.action == "list":
-            qs = qs.filter(status=Shop.Status.ACTIVE)
+            today = timezone.localdate()
+            qs = (
+                qs.filter(status=Shop.Status.ACTIVE)
+                .annotate(
+                    _services_count=Count(
+                        "services",
+                        filter=Q(services__is_active=True),
+                        distinct=True,
+                    ),
+                    _reviews_count=Count("reviews", distinct=True),
+                    _avg_rating=Avg("reviews__rating"),
+                )
+                .prefetch_related(
+                    "categories",
+                    "photos",
+                    "weekday_hours",
+                    Prefetch(
+                        "overrides",
+                        queryset=HoursOverride.objects.filter(date=today),
+                        to_attr="_prefetched_overrides_today",
+                    ),
+                )
+            )
         if self.action in ("update", "partial_update", "destroy"):
             qs = qs.filter(owner=self.request.user)
         return qs
+
+    def filter_queryset(self, queryset):
+        """Translate the public `ordering` aliases onto the annotation columns.
+
+        We expose `avg_rating` / `reviews_count` (clean public names) but
+        store them as `_avg_rating` / `_reviews_count` on the queryset to
+        avoid colliding with the reverse-accessor names. Rewriting the
+        query param here keeps DRF's OrderingFilter happy without polluting
+        the annotation namespace.
+
+        Also applies the public `booking_date` and `min_rating` filters used
+        by the browse page. `booking_date` is a Python-side filter (slot
+        computation), so we narrow with a coarse SQL "is-open-that-day"
+        pre-filter first to keep the work bounded.
+        """
+        ordering = self.request.query_params.get("ordering")
+        if ordering:
+            translated = []
+            for part in ordering.split(","):
+                key = part.strip()
+                if not key:
+                    continue
+                prefix = ""
+                if key.startswith("-"):
+                    prefix, key = "-", key[1:]
+                if key in ("avg_rating", "reviews_count"):
+                    key = f"_{key}"
+                translated.append(f"{prefix}{key}")
+            if translated:
+                new_value = ",".join(translated)
+                if new_value != ordering:
+                    mutable = self.request.GET.copy()
+                    mutable["ordering"] = new_value
+                    self.request._request.GET = mutable
+
+        qs = super().filter_queryset(queryset)
+        qs = self._apply_min_rating(qs)
+        qs = self._apply_booking_date(qs)
+        return qs
+
+    def _apply_min_rating(self, queryset):
+        raw = self.request.query_params.get("min_rating")
+        if not raw:
+            return queryset
+        try:
+            threshold = float(raw)
+        except ValueError:
+            return queryset
+        return queryset.filter(_avg_rating__gte=threshold)
+
+    def _apply_booking_date(self, queryset):
+        raw = self.request.query_params.get("booking_date")
+        if not raw:
+            return queryset
+        try:
+            target = datetime.strptime(raw, "%Y-%m-%d").date()
+        except ValueError:
+            return queryset
+        if target < timezone.localdate():
+            return queryset.none()
+
+        target_time = self._parse_booking_time()
+        guests = self._parse_guests()
+
+        from .services import shop_has_free_slot_on_date
+
+        weekday = target.weekday()
+        candidates = (
+            queryset.filter(
+                Q(
+                    weekday_hours__weekday=weekday,
+                    weekday_hours__is_closed=False,
+                    weekday_hours__open_time__isnull=False,
+                    weekday_hours__close_time__isnull=False,
+                )
+                | Q(
+                    overrides__date=target,
+                    overrides__is_closed=False,
+                    overrides__open_time__isnull=False,
+                    overrides__close_time__isnull=False,
+                )
+            )
+            .exclude(overrides__date=target, overrides__is_closed=True)
+            .distinct()
+            .prefetch_related("services", "resources")
+        )
+        matching_ids = [
+            s.id
+            for s in candidates
+            if shop_has_free_slot_on_date(
+                s, target, target_time=target_time, quantity=guests
+            )
+        ]
+        return queryset.filter(id__in=matching_ids)
+
+    def _parse_booking_time(self):
+        """Parse `?booking_time=HH:MM`. Returns None if missing or malformed.
+
+        Silently ignoring malformed input mirrors `_apply_booking_date`'s
+        contract: bad filter params shouldn't 400 a browse page request.
+        """
+        raw = self.request.query_params.get("booking_time")
+        if not raw:
+            return None
+        for fmt in ("%H:%M", "%H:%M:%S"):
+            try:
+                return datetime.strptime(raw, fmt).time()
+            except ValueError:
+                continue
+        return None
+
+    def _parse_guests(self) -> int:
+        """Parse `?guests=N` (party size / units). Defaults to 1; clamps to
+        a sane upper bound so a hostile caller can't ask us to scan services
+        for `guests=999999`."""
+        raw = self.request.query_params.get("guests")
+        if not raw:
+            return 1
+        try:
+            value = int(raw)
+        except ValueError:
+            return 1
+        return max(1, min(value, 50))
 
     def create(self, request, *args, **kwargs):
         """Override to return the detail representation (with id, status, etc.)."""
@@ -94,7 +271,8 @@ class ShopViewSet(viewsets.ModelViewSet):
         self.perform_create(write_serializer)
         shop = write_serializer.instance
         return Response(
-            ShopDetailSerializer(shop).data, status=status.HTTP_201_CREATED
+            ShopDetailSerializer(shop, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
         )
 
     def update(self, request, *args, **kwargs):
@@ -104,7 +282,11 @@ class ShopViewSet(viewsets.ModelViewSet):
         write_serializer = self.get_serializer(instance, data=request.data, partial=partial)
         write_serializer.is_valid(raise_exception=True)
         self.perform_update(write_serializer)
-        return Response(ShopDetailSerializer(write_serializer.instance).data)
+        return Response(
+            ShopDetailSerializer(
+                write_serializer.instance, context={"request": request}
+            ).data
+        )
 
     def perform_create(self, serializer):
         data = serializer.validated_data
@@ -124,6 +306,7 @@ class ShopViewSet(viewsets.ModelViewSet):
                 data["latitude"], data["longitude"] = coords
         shop = serializer.save(owner=self.request.user)
         _ensure_default_hours(shop)
+        _ensure_default_resource(shop)
 
     def perform_update(self, serializer):
         data = serializer.validated_data
@@ -147,6 +330,24 @@ class ShopViewSet(viewsets.ModelViewSet):
             if coords:
                 data["latitude"], data["longitude"] = coords
         serializer.save()
+
+    @action(detail=False, methods=["get"], permission_classes=[permissions.AllowAny])
+    def cities(self, request):
+        """Distinct cities of currently-active shops, A-Z, unpaginated.
+
+        Powers the city dropdown on the public browse page. Kept tiny —
+        plain list of strings — because dropdowns don't need pagination
+        and an A-Z sort is more useful than the default queryset order.
+        """
+        names = (
+            Shop.objects.filter(status=Shop.Status.ACTIVE)
+            .exclude(city="")
+            .exclude(city__isnull=True)
+            .values_list("city", flat=True)
+            .distinct()
+            .order_by("city")
+        )
+        return Response(list(names))
 
     @action(detail=False, methods=["get"], permission_classes=[permissions.AllowAny])
     def nearby(self, request):
@@ -173,24 +374,74 @@ class ShopViewSet(viewsets.ModelViewSet):
             if distance <= radius:
                 results.append((distance, shop))
         results.sort(key=lambda x: x[0])
-        data = ShopListSerializer([s for _, s in results], many=True).data
+        data = ShopListSerializer(
+            [s for _, s in results], many=True, context={"request": request}
+        ).data
         for entry, (distance, _) in zip(data, results):
             entry["distance_km"] = round(distance, 2)
         return Response(data)
 
     @action(detail=False, methods=["get"], permission_classes=[IsShopOwner])
     def mine(self, request):
-        shops = Shop.objects.filter(owner=request.user)
-        return Response(ShopListSerializer(shops, many=True).data)
+        shops = Shop.objects.filter(owner=request.user).order_by("-created_at")
+        page = self.paginate_queryset(shops)
+        if page is not None:
+            serializer = ShopListSerializer(
+                page, many=True, context={"request": request}
+            )
+            return self.get_paginated_response(serializer.data)
+        return Response(
+            ShopListSerializer(shops, many=True, context={"request": request}).data
+        )
+
+    @action(
+        detail=False,
+        methods=["get"],
+        url_path="commission-invoices",
+        permission_classes=[IsShopOwner],
+    )
+    def commission_invoices(self, request):
+        """This owner's commission invoices across all their shops."""
+        from apps.reservations.models import CommissionInvoice
+        from apps.reservations.serializers import CommissionInvoiceSerializer
+
+        qs = (
+            CommissionInvoice.objects.select_related("shop")
+            .filter(shop__owner=request.user)
+            .order_by("-period", "shop_id")
+        )
+        if (status_f := request.query_params.get("status")):
+            qs = qs.filter(status=status_f)
+        return Response(CommissionInvoiceSerializer(qs, many=True).data)
 
     @action(detail=True, methods=["post"], permission_classes=[IsShopOwner])
     def publish(self, request, pk=None):
         shop = self.get_object()
         if shop.owner_id != request.user.id:
             return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
+
+        from apps.reservations.commission_billing import _has_blocking_invoice
+
+        if _has_blocking_invoice(shop):
+            return Response(
+                {
+                    "detail": (
+                        "Settle the outstanding commission invoice before "
+                        "publishing this shop."
+                    )
+                },
+                status=status.HTTP_400_BAD_REQUEST,
+            )
         shop.status = Shop.Status.ACTIVE
-        shop.save(update_fields=["status", "updated_at"])
-        return Response(ShopDetailSerializer(shop).data)
+        shop.auto_paused_for_unpaid_commission = False
+        shop.save(
+            update_fields=[
+                "status",
+                "auto_paused_for_unpaid_commission",
+                "updated_at",
+            ]
+        )
+        return Response(ShopDetailSerializer(shop, context={"request": request}).data)
 
     @action(detail=True, methods=["post"], permission_classes=[IsShopOwner])
     def pause(self, request, pk=None):
@@ -199,7 +450,7 @@ class ShopViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
         shop.status = Shop.Status.PAUSED
         shop.save(update_fields=["status", "updated_at"])
-        return Response(ShopDetailSerializer(shop).data)
+        return Response(ShopDetailSerializer(shop, context={"request": request}).data)
 
     @action(detail=True, methods=["get", "put"], url_path="hours")
     def hours(self, request, pk=None):
@@ -248,7 +499,9 @@ class ShopViewSet(viewsets.ModelViewSet):
         shop = self.get_object()
         if request.method == "GET":
             qs = ShopPhoto.objects.filter(shop=shop).order_by("sort_order", "id")
-            return Response(ShopPhotoSerializer(qs, many=True).data)
+            return Response(
+                ShopPhotoSerializer(qs, many=True, context={"request": request}).data
+            )
 
         if shop.owner_id != request.user.id:
             return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
@@ -256,13 +509,24 @@ class ShopViewSet(viewsets.ModelViewSet):
         image = request.FILES.get("image")
         if image is None:
             return Response({"detail": "image file is required."}, status=400)
+        # New uploads go to the back of the queue (after any existing photos)
+        # so they don't accidentally replace the cover.
+        next_order = (
+            ShopPhoto.objects.filter(shop=shop)
+            .order_by("-sort_order")
+            .values_list("sort_order", flat=True)
+            .first()
+        )
         photo = ShopPhoto.objects.create(
             shop=shop,
             image=image,
             caption=request.data.get("caption", ""),
-            sort_order=int(request.data.get("sort_order", 0) or 0),
+            sort_order=(next_order + 1) if next_order is not None else 0,
         )
-        return Response(ShopPhotoSerializer(photo).data, status=status.HTTP_201_CREATED)
+        return Response(
+            ShopPhotoSerializer(photo, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=True, methods=["delete"], url_path=r"photos/(?P<photo_id>\d+)")
     def delete_photo(self, request, pk=None, photo_id=None):
@@ -271,6 +535,38 @@ class ShopViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
         ShopPhoto.objects.filter(shop=shop, id=photo_id).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(detail=True, methods=["post"], url_path=r"photos/(?P<photo_id>\d+)/cover")
+    def set_cover_photo(self, request, pk=None, photo_id=None):
+        """Promote a photo to cover by giving it sort_order=0 and bumping others.
+
+        The shop list/detail endpoints derive `cover_photo` from the photo with
+        the lowest `(sort_order, id)`, so setting the target to 0 makes it the
+        cover unconditionally. We renumber the rest 1..N in their existing
+        relative order to keep the sort sequence dense.
+        """
+        shop = self.get_object()
+        if shop.owner_id != request.user.id:
+            return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
+        target = ShopPhoto.objects.filter(shop=shop, id=photo_id).first()
+        if not target:
+            return Response({"detail": "Not found."}, status=status.HTTP_404_NOT_FOUND)
+        with transaction.atomic():
+            others = (
+                ShopPhoto.objects.filter(shop=shop)
+                .exclude(id=target.id)
+                .order_by("sort_order", "id")
+            )
+            target.sort_order = 0
+            target.save(update_fields=["sort_order"])
+            for i, other in enumerate(others, start=1):
+                if other.sort_order != i:
+                    other.sort_order = i
+                    other.save(update_fields=["sort_order"])
+        qs = ShopPhoto.objects.filter(shop=shop).order_by("sort_order", "id")
+        return Response(
+            ShopPhotoSerializer(qs, many=True, context={"request": request}).data
+        )
 
     @action(detail=True, methods=["get", "post"], url_path="overrides")
     def overrides(self, request, pk=None):
@@ -302,6 +598,37 @@ class ShopViewSet(viewsets.ModelViewSet):
             return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
         HoursOverride.objects.filter(shop=shop, id=override_id).delete()
         return Response(status=status.HTTP_204_NO_CONTENT)
+
+    @action(
+        detail=True,
+        methods=["get"],
+        url_path="stations-availability",
+        permission_classes=[IsShopOwner],
+    )
+    def stations_availability(self, request, pk=None):
+        """Per-station availability + timeline for a single day.
+
+        Thin HTTP wrapper around `services.station_day_availability`.
+        Powers the shop-owner Stations dashboard. See the service docstring
+        for the response shape.
+        """
+        shop = self.get_object()
+        if shop.owner_id != request.user.id:
+            return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
+        raw = request.query_params.get("date")
+        if raw:
+            try:
+                target = datetime.strptime(raw, "%Y-%m-%d").date()
+            except ValueError:
+                return Response(
+                    {"detail": "date must be YYYY-MM-DD."},
+                    status=status.HTTP_400_BAD_REQUEST,
+                )
+        else:
+            target = timezone.localdate()
+        from .services import station_day_availability
+
+        return Response(station_day_availability(shop, target))
 
     @action(detail=True, methods=["get"], permission_classes=[IsShopOwner])
     def analytics(self, request, pk=None):
@@ -374,6 +701,66 @@ def _ensure_default_hours(shop):
         WeekdayHours.objects.bulk_create(rows)
 
 
+def _ensure_default_resource(shop):
+    """Every shop needs at least one bookable Resource (its parallel capacity).
+
+    A brand-new shop starts at capacity 1 ("Station 1"); the owner adds more
+    (bays/chairs/rooms) and renames them via the Resource endpoints. Without
+    this, the shop would have zero capacity and offer no slots.
+    """
+    if not Resource.objects.filter(shop=shop).exists():
+        Resource.objects.create(shop=shop, name=f"{shop.resource_label} 1")
+
+
+class ResourceViewSet(viewsets.ModelViewSet):
+    """Owner-managed bookable Resources (the per-shop parallel capacity)."""
+
+    serializer_class = ResourceSerializer
+
+    def get_permissions(self):
+        if self.action in ("list", "retrieve"):
+            return [permissions.AllowAny()]
+        return [IsShopOwner()]
+
+    def get_queryset(self):
+        qs = Resource.objects.all()
+        shop_id = self.request.query_params.get("shop")
+        if shop_id:
+            qs = qs.filter(shop_id=shop_id)
+        if self.action == "list":
+            # Public callers only see active Resources; the owner sees all of
+            # their own (so they can re-activate a retired one).
+            user = self.request.user
+            owns = (
+                user.is_authenticated
+                and shop_id
+                and Shop.objects.filter(pk=shop_id, owner=user).exists()
+            )
+            if not owns:
+                qs = qs.filter(is_active=True)
+        if self.action in ("update", "partial_update", "destroy"):
+            qs = qs.filter(shop__owner=self.request.user)
+        return qs.order_by("id")
+
+    def perform_create(self, serializer):
+        shop = serializer.validated_data["shop"]
+        if shop.owner_id != self.request.user.id:
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied("You do not own this shop.")
+        serializer.save()
+
+    def destroy(self, request, *args, **kwargs):
+        """Hard-delete only if unused; otherwise retire (is_active=False) so the
+        booking history that PROTECTs this Resource stays intact."""
+        resource = self.get_object()
+        if resource.reservations.exists():
+            resource.is_active = False
+            resource.save(update_fields=["is_active", "updated_at"])
+            return Response(ResourceSerializer(resource).data)
+        return super().destroy(request, *args, **kwargs)
+
+
 class StaffViewSet(viewsets.ModelViewSet):
     serializer_class = StaffSerializer
 
@@ -390,6 +777,28 @@ class StaffViewSet(viewsets.ModelViewSet):
         if self.action in ("update", "partial_update", "destroy"):
             qs = qs.filter(shop__owner=self.request.user)
         return qs
+
+    @action(detail=False, methods=["get"], url_path="stats", permission_classes=[IsShopOwner])
+    def stats(self, request):
+        """Aggregate counts for the staff KPI cards on the owner dashboard.
+
+        Mirrors the `/services/stats/` pattern: requires `?shop=<id>` and that
+        the caller owns the shop. Counts run against the whole staff table for
+        the shop so they stay stable independent of any list pagination.
+        """
+        shop_id = request.query_params.get("shop")
+        if not shop_id:
+            return Response({"detail": "shop is required."}, status=status.HTTP_400_BAD_REQUEST)
+        if not Shop.objects.filter(pk=shop_id, owner=request.user).exists():
+            return Response({"detail": "Forbidden."}, status=status.HTTP_403_FORBIDDEN)
+        qs = Staff.objects.filter(shop_id=shop_id)
+        total = qs.count()
+        active = qs.filter(is_active=True).count()
+        return Response({
+            "total": total,
+            "active": active,
+            "inactive": total - active,
+        })
 
     @action(detail=True, methods=["get", "put"], url_path="hours")
     def working_hours(self, request, pk=None):
@@ -431,7 +840,73 @@ class FavoriteViewSet(viewsets.ModelViewSet):
     http_method_names = ["get", "post", "delete"]
 
     def get_queryset(self):
-        return Favorite.objects.filter(customer=self.request.user)
+        return (
+            Favorite.objects.filter(customer=self.request.user)
+            .select_related("shop")
+            .prefetch_related("shop__categories", "shop__photos")
+            .order_by("-created_at")
+        )
 
     def perform_create(self, serializer):
         serializer.save(customer=self.request.user)
+
+
+class TimeBlockViewSet(viewsets.ModelViewSet):
+    """Owner-managed `TimeBlock` CRUD.
+
+    A `TimeBlock` carves capacity off a Resource (or the whole shop) for a
+    finite window — breaks, maintenance, vacations. List/retrieve are scoped
+    to the requesting owner's shops; create/update/destroy require the user
+    to own the shop in the payload.
+    """
+
+    serializer_class = TimeBlockSerializer
+    permission_classes = [IsShopOwner]
+
+    def get_queryset(self):
+        user = self.request.user
+        if not (user and user.is_authenticated):
+            return TimeBlock.objects.none()
+        qs = TimeBlock.objects.filter(shop__owner=user)
+
+        shop_id = self.request.query_params.get("shop")
+        if shop_id:
+            if not Shop.objects.filter(pk=shop_id, owner=user).exists():
+                return TimeBlock.objects.none()
+            qs = qs.filter(shop_id=shop_id)
+
+        resource_id = self.request.query_params.get("resource")
+        if resource_id:
+            qs = qs.filter(resource_id=resource_id)
+
+        from_raw = self.request.query_params.get("from")
+        to_raw = self.request.query_params.get("to")
+        if from_raw:
+            try:
+                from_date = datetime.strptime(from_raw, "%Y-%m-%d").date()
+                qs = qs.filter(start_at__date__gte=from_date)
+            except ValueError:
+                pass
+        if to_raw:
+            try:
+                to_date = datetime.strptime(to_raw, "%Y-%m-%d").date()
+                qs = qs.filter(start_at__date__lte=to_date)
+            except ValueError:
+                pass
+        return qs.select_related("shop", "resource", "staff").order_by("start_at")
+
+    def perform_create(self, serializer):
+        shop = serializer.validated_data["shop"]
+        if shop.owner_id != self.request.user.id:
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied("You do not own this shop.")
+        serializer.save()
+
+    def perform_update(self, serializer):
+        shop = serializer.validated_data.get("shop") or serializer.instance.shop
+        if shop.owner_id != self.request.user.id:
+            from rest_framework.exceptions import PermissionDenied
+
+            raise PermissionDenied("You do not own this shop.")
+        serializer.save()

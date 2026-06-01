@@ -42,6 +42,10 @@ module "vpc" {
   database_subnets = var.create_database_subnets ? local.cidrs[2] : []
 
   create_database_subnet_route_table = true
+  # Non-prod only: adds a 0.0.0.0/0 → IGW route to the database route table so an
+  # RDS instance with publicly_accessible=true gets a reachable public endpoint.
+  # Access is still gated by the RDS security group. Keep false for prod.
+  create_database_internet_gateway_route = var.create_database_internet_gateway_route
 
   private_subnet_names  = ["net-${var.env}-private-az1", "net-${var.env}-private-az2"]
   public_subnet_names   = ["net-${var.env}-public-az1", "net-${var.env}-public-az2"]

@@ -6,7 +6,12 @@ from .models import Review
 
 
 class ReviewSerializer(serializers.ModelSerializer):
-    customer_name = serializers.CharField(source="customer.username", read_only=True)
+    customer_name = serializers.SerializerMethodField()
+
+    def get_customer_name(self, obj) -> str:
+        # username now mirrors the email, so never expose it publicly here.
+        full_name = f"{obj.customer.first_name} {obj.customer.last_name}".strip()
+        return full_name or "Customer"
 
     class Meta:
         model = Review

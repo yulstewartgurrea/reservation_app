@@ -1,0 +1,41 @@
+{% extends "emails/_base.html" %}
+{% block title %}Appointment confirmed &middot; BookMe{% endblock %}
+{% block preheader %}{{ shop.name }} confirmed your appointment on {{ start_at|date:"l, F j" }}.{% endblock %}
+{% block content %}
+  <div style="text-align:center;margin:0 0 18px 0;">
+    <span style="display:inline-block;background:#ecfdf5;color:#047857;font-size:12px;font-weight:600;letter-spacing:0.04em;text-transform:uppercase;padding:5px 12px;border-radius:999px;">Confirmed by shop</span>
+  </div>
+
+  <h1 style="margin:0 0 8px 0;font-size:24px;font-weight:700;color:#0f172a;text-align:center;letter-spacing:-0.01em;">You&rsquo;re all set</h1>
+  <p style="margin:0 0 24px 0;font-size:15px;line-height:1.6;color:#475569;text-align:center;">
+    Hi {{ customer_name }}, <strong style="color:#0f172a;">{{ shop.name }}</strong> has confirmed your appointment. Here&rsquo;s your receipt.
+  </p>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 24px 0;background:#f8fafc;border:1px solid #e2e8f0;border-radius:14px;">
+    <tr>
+      <td style="padding:18px 22px;">
+        <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0">
+          <tr><td style="padding:6px 0;font-size:13px;color:#64748b;width:32%;">Service</td><td style="padding:6px 0;font-size:14px;color:#0f172a;font-weight:600;">{{ service.name }}</td></tr>
+          <tr><td style="padding:6px 0;font-size:13px;color:#64748b;">When</td><td style="padding:6px 0;font-size:14px;color:#0f172a;">{{ start_at|date:"l, F j, Y" }} at {{ start_at|time:"g:i A" }}</td></tr>
+          <tr><td style="padding:6px 0;font-size:13px;color:#64748b;">Duration</td><td style="padding:6px 0;font-size:14px;color:#0f172a;">{{ service.duration_minutes }} min</td></tr>
+          <tr><td style="padding:6px 0;font-size:13px;color:#64748b;">Total</td><td style="padding:6px 0;font-size:14px;color:#0f172a;">&#8369;{{ total_price }} <span style="color:#64748b;font-size:13px;">&middot; {{ payment_label }}</span></td></tr>
+          <tr><td style="padding:6px 0;font-size:13px;color:#64748b;vertical-align:top;">Address</td><td style="padding:6px 0;font-size:14px;color:#0f172a;">{{ shop.address_line }}, {{ shop.city }}</td></tr>
+        </table>
+      </td>
+    </tr>
+  </table>
+
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" border="0" style="margin:0 0 8px 0;">
+    <tr>
+      <td align="center">
+        <a href="{{ frontend_url }}/reservations" style="display:inline-block;background:#4f46e5;color:#ffffff;text-decoration:none;font-weight:600;font-size:15px;padding:13px 28px;border-radius:10px;line-height:1.2;">
+          View booking
+        </a>
+      </td>
+    </tr>
+  </table>
+
+  <p style="margin:24px 0 0 0;font-size:13px;line-height:1.6;color:#94a3b8;text-align:center;">
+    Need to make changes? Open the booking in the BookMe app to reschedule or cancel.
+  </p>
+{% endblock %}

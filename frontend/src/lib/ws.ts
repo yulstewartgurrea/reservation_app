@@ -1,5 +1,7 @@
 "use client";
 
+import { API_ORIGIN } from "./api";
+
 export type WsNotification = {
   kind: string;
   title: string;
@@ -9,8 +11,12 @@ export type WsNotification = {
 
 function wsBase(): string | null {
   if (typeof window === "undefined") return null;
-  const apiUrl = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:8000";
-  return apiUrl.replace(/^http/, "ws");
+  // Explicit origin (local dev) → swap http→ws / https→wss.
+  if (API_ORIGIN) return API_ORIGIN.replace(/^http/, "ws");
+  // Same-origin (production): derive from the current page so it works on any
+  // host. CloudFront upgrades and routes /ws/* to the backend.
+  const proto = window.location.protocol === "https:" ? "wss" : "ws";
+  return `${proto}://${window.location.host}`;
 }
 
 function wsToken(): string | null {
@@ -46,16 +52,40 @@ export type ChatRoomEvent =
       type: "chat.read_state";
       user_id: number;
       last_read_message_id: number | null;
+    }
+  | {
+      type: "chat.typing";
+      room_id: number;
+      user_id: number;
+      is_typing: boolean;
     };
+
+export type ChatAttachmentKind = "image" | "video" | "file";
 
 export type ChatMessage = {
   id: number;
   room_id: number;
   sender_id: number;
   body: string;
+  attachment_url: string | null;
+  attachment_kind: ChatAttachmentKind | null;
+  attachment_name: string | null;
+  attachment_size: number | null;
+  attachment_mime: string | null;
   created_at: string;
   edited_at: string | null;
 };
+
+/** Prepend the API base to a relative URL (e.g. `/media/...`) so it can be
+ * loaded from any origin. Absolute URLs pass through unchanged. */
+export function absUrl(url: string | null | undefined): string | null {
+  if (!url) return null;
+  if (/^https?:\/\//i.test(url)) return url;
+  // Same-origin (production): keep it relative so it resolves against the
+  // current host. Explicit origin (local dev): prefix it.
+  if (!API_ORIGIN) return url.startsWith("/") ? url : `/${url}`;
+  return `${API_ORIGIN}${url.startsWith("/") ? "" : "/"}${url}`;
+}
 
 export function connectChatRoom(
   roomId: number,
@@ -79,4 +109,13 @@ export function connectChatRoom(
   };
 
   return socket;
+}
+
+export function sendTyping(socket: WebSocket | null, isTyping: boolean): void {
+  if (!socket || socket.readyState !== WebSocket.OPEN) return;
+  try {
+    socket.send(JSON.stringify({ type: "typing", is_typing: isTyping }));
+  } catch {
+    /* ignore */
+  }
 }

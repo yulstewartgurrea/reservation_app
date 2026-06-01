@@ -11,6 +11,7 @@ from django.db import transaction
 from django.db.models import Count, Q
 from django.utils import timezone
 
+from apps.notifications.models import Notification
 from apps.shops.models import Shop
 
 from .models import ChatParticipant, ChatRoom, Message
@@ -52,15 +53,45 @@ def get_participant(*, room: ChatRoom, user) -> ChatParticipant:
 
 # --- messaging ------------------------------------------------------------
 
-def send_message(*, room: ChatRoom, sender, body: str) -> Message:
+_IMAGE_MIMES = {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "image/heic"}
+_VIDEO_MIMES = {"video/mp4", "video/webm", "video/quicktime", "video/ogg"}
+# 25MB ceiling — large enough for short clips, small enough to keep storage costs sane.
+_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024
+
+
+def _classify_attachment(file) -> tuple[str, str]:
+    """Return (kind, mime). `kind` is one of Message.AttachmentKind values."""
+    mime = (getattr(file, "content_type", "") or "").lower()
+    if mime in _IMAGE_MIMES:
+        return Message.AttachmentKind.IMAGE, mime
+    if mime in _VIDEO_MIMES:
+        return Message.AttachmentKind.VIDEO, mime
+    return Message.AttachmentKind.FILE, mime or "application/octet-stream"
+
+
+def send_message(*, room: ChatRoom, sender, body: str, attachment=None) -> Message:
     if not user_can_access_room(sender, room):
         raise PermissionError("Not a participant of this room.")
     body = (body or "").strip()
-    if not body:
-        raise ValueError("Message body cannot be empty.")
+    if not body and not attachment:
+        raise ValueError("Message must have a body or an attachment.")
+
+    attach_kwargs: dict = {}
+    if attachment is not None:
+        size = getattr(attachment, "size", 0) or 0
+        if size > _MAX_ATTACHMENT_BYTES:
+            raise ValueError("Attachment is too large (25MB max).")
+        kind, mime = _classify_attachment(attachment)
+        attach_kwargs = {
+            "attachment": attachment,
+            "attachment_kind": kind,
+            "attachment_name": getattr(attachment, "name", "") or "",
+            "attachment_size": size,
+            "attachment_mime": mime,
+        }
 
     with transaction.atomic():
-        msg = Message.objects.create(room=room, sender=sender, body=body)
+        msg = Message.objects.create(room=room, sender=sender, body=body, **attach_kwargs)
         ChatRoom.objects.filter(pk=room.pk).update(last_message_at=msg.created_at)
         # Sender has implicitly read their own message
         ChatParticipant.objects.filter(room=room, user=sender).update(last_read_message=msg)
@@ -178,25 +209,77 @@ def _broadcast_room(room: ChatRoom, payload: dict) -> None:
 
 
 def _notify_recipients(*, room: ChatRoom, sender, msg: Message) -> None:
-    """Push a lightweight `chat.new_message` event onto each recipient's user.<id>
-    group so their global unread badge updates without an open room socket."""
+    """Persist a `chat.new_message` notification for each recipient and push
+    the same event onto their `user.<id>` group so open clients update live.
+
+    Collapses per room: if a recipient already has an unread notification for
+    this room, refresh it in place instead of inserting a new row — otherwise
+    a noisy thread would flood the bell with one entry per message.
+    """
+    sender_name = _chat_sender_display(room=room, sender=sender)
+    recipient_ids = {room.customer_id, room.shop.owner_id} - {sender.id}
+    body = msg.body[:120]
+    payload = {"room_id": room.id, "message_id": msg.id}
+
+    for uid in recipient_ids:
+        _upsert_chat_notification(
+            uid=uid, sender_name=sender_name, body=body, payload=payload
+        )
+
     layer = get_channel_layer()
     if layer is None:
         return
-    recipient_ids = {room.customer_id, room.shop.owner_id} - {sender.id}
     for uid in recipient_ids:
         async_to_sync(layer.group_send)(
             f"user.{uid}",
             {
                 "type": "notify",
                 "data": {
-                    "kind": "chat.new_message",
-                    "title": "New message",
-                    "body": msg.body[:120],
-                    "payload": {"room_id": room.id, "message_id": msg.id},
+                    "kind": Notification.Kind.CHAT_NEW_MESSAGE,
+                    "title": sender_name,
+                    "body": body,
+                    "payload": payload,
                 },
             },
         )
+
+
+def _upsert_chat_notification(*, uid: int, sender_name: str, body: str, payload: dict) -> None:
+    with transaction.atomic():
+        existing = (
+            Notification.objects.select_for_update()
+            .filter(
+                user_id=uid,
+                kind=Notification.Kind.CHAT_NEW_MESSAGE,
+                read_at__isnull=True,
+                payload__room_id=payload["room_id"],
+            )
+            .order_by("-created_at")
+            .first()
+        )
+        if existing:
+            existing.title = sender_name
+            existing.body = body
+            existing.payload = payload
+            existing.created_at = timezone.now()
+            existing.save(update_fields=["title", "body", "payload", "created_at"])
+        else:
+            Notification.objects.create(
+                user_id=uid,
+                kind=Notification.Kind.CHAT_NEW_MESSAGE,
+                title=sender_name,
+                body=body,
+                payload=payload,
+            )
+
+
+def _chat_sender_display(*, room: ChatRoom, sender) -> str:
+    # Shop owner messages are presented as coming from the shop, since the
+    # customer sees the conversation in terms of the business, not the person.
+    if sender.id == room.shop.owner_id:
+        return room.shop.name
+    name = (sender.first_name or "").strip()
+    return name or sender.email
 
 
 def _serialize(msg: Message) -> dict:
@@ -205,6 +288,11 @@ def _serialize(msg: Message) -> dict:
         "room_id": msg.room_id,
         "sender_id": msg.sender_id,
         "body": msg.body,
+        "attachment_url": msg.attachment.url if msg.attachment else None,
+        "attachment_kind": msg.attachment_kind or None,
+        "attachment_name": msg.attachment_name or None,
+        "attachment_size": msg.attachment_size,
+        "attachment_mime": msg.attachment_mime or None,
         "edited_at": msg.edited_at.isoformat() if msg.edited_at else None,
         "created_at": msg.created_at.isoformat(),
     }

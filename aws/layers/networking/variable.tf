@@ -45,3 +45,9 @@ variable "create_database_subnets" {
   type    = bool
   default = true
 }
+
+variable "create_database_internet_gateway_route" {
+  description = "Add a 0.0.0.0/0 → IGW route to the database route table so a publicly_accessible RDS instance is reachable. Non-prod convenience only; access stays SG-gated. Keep false for prod."
+  type        = bool
+  default     = false
+}

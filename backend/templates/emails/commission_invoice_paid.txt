@@ -1,0 +1,13 @@
+Hi {{ owner_name }},
+
+Thank you — the {{ period }} commission invoice for {{ shop.name }} has been
+marked paid.
+
+Shop: {{ shop.name }}
+Period: {{ period }}
+
+Amount paid: PHP {{ amount }} ({{ method_label }})
+
+This email is your receipt — keep it for your records.
+
+— BookMe

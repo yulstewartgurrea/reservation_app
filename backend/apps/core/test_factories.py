@@ -51,8 +51,13 @@ def make_shop(
     open_all_week=True,
     commission_rate=None,
     cancellation_window_hours=None,
+    resources=1,
 ):
-    from apps.shops.models import Shop, WeekdayHours
+    """Create a shop. `resources` is its parallel capacity (number of bookable
+    Resources, "Station 1".."Station N"). Every shop needs at least one for any
+    slot to be bookable, so this defaults to 1 — matching the API, which gives
+    each new shop a default Resource."""
+    from apps.shops.models import Resource, Shop, WeekdayHours
 
     owner = owner or make_shop_owner()
     shop = Shop.objects.create(
@@ -74,10 +79,28 @@ def make_shop(
                 open_time=time(8, 0),
                 close_time=time(20, 0),
             )
+    for i in range(1, max(resources, 0) + 1):
+        Resource.objects.create(shop=shop, name=f"Station {i}")
     return shop
 
 
-def make_service(*, shop=None, name="Haircut", duration=60, buffer_=0, price="500.00"):
+def make_resource(*, shop=None, name=None):
+    from apps.shops.models import Resource
+
+    shop = shop or make_shop(resources=0)
+    n = Resource.objects.filter(shop=shop).count() + 1
+    return Resource.objects.create(shop=shop, name=name or f"Station {n}")
+
+
+def make_service(
+    *,
+    shop=None,
+    name="Haircut",
+    duration=60,
+    buffer_=0,
+    price="500.00",
+    inter_unit_buffer_minutes=0,
+):
     from apps.services.models import Service
 
     shop = shop or make_shop()
@@ -87,6 +110,7 @@ def make_service(*, shop=None, name="Haircut", duration=60, buffer_=0, price="50
         duration_minutes=duration,
         buffer_minutes=buffer_,
         price=Decimal(price),
+        inter_unit_buffer_minutes=inter_unit_buffer_minutes,
     )
 
 

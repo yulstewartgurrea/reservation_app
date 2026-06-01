@@ -45,22 +45,28 @@ def to_centavos(amount: Decimal | str | float) -> int:
     return int((Decimal(str(amount)) * 100).to_integral_value())
 
 
-def create_checkout_session(
+def create_generic_checkout_session(
     *,
-    reservation,
+    amount: Decimal | str | float,
+    description: str,
+    reference: str,
     success_url: str,
     cancel_url: str,
-    description: str = "",
+    line_item_name: str | None = None,
 ) -> dict[str, Any]:
-    """Create a PayMongo Checkout Session for a reservation.
+    """Create a PayMongo Checkout Session for an arbitrary PHP amount.
 
-    Returns a dict with at least: id, url, raw.
+    The shared primitive behind both reservation payments and commission
+    invoices. Returns a dict with at least: id, url, raw.
+
+    Dev-fake fallback (no PAYMONGO_SECRET_KEY): returns a sentinel session with
+    a fake URL so the whole flow stays runnable locally without an API key.
     """
     if not _is_configured():
         fake_id = f"{DEV_FAKE_PREFIX}{uuid.uuid4().hex[:24]}"
         logger.warning(
-            "PAYMONGO_SECRET_KEY not set — returning a dev-fake checkout session for reservation %s",
-            reservation.id,
+            "PAYMONGO_SECRET_KEY not set — returning a dev-fake checkout session for %s",
+            reference,
         )
         return {
             "id": fake_id,
@@ -74,19 +80,19 @@ def create_checkout_session(
                 "send_email_receipt": True,
                 "show_description": bool(description),
                 "show_line_items": True,
-                "description": description or f"Reservation #{reservation.id}",
+                "description": description,
                 "line_items": [
                     {
                         "currency": "PHP",
-                        "amount": to_centavos(reservation.total_price),
-                        "name": reservation.service.name,
+                        "amount": to_centavos(amount),
+                        "name": line_item_name or description,
                         "quantity": 1,
                     }
                 ],
                 "payment_method_types": ["card", "gcash", "grab_pay", "paymaya"],
                 "success_url": success_url,
                 "cancel_url": cancel_url,
-                "reference_number": f"reservation-{reservation.id}",
+                "reference_number": reference,
             }
         }
     }
@@ -106,6 +112,30 @@ def create_checkout_session(
         "url": attributes.get("checkout_url", ""),
         "raw": data,
     }
+
+
+def create_checkout_session(
+    *,
+    reservation,
+    success_url: str,
+    cancel_url: str,
+    description: str = "",
+) -> dict[str, Any]:
+    """Create a PayMongo Checkout Session for a reservation.
+
+    Thin wrapper over :func:`create_generic_checkout_session` so reservation
+    payments and commission invoices share one code path.
+
+    Returns a dict with at least: id, url, raw.
+    """
+    return create_generic_checkout_session(
+        amount=reservation.total_price,
+        description=description or f"Reservation #{reservation.id}",
+        reference=f"reservation-{reservation.id}",
+        success_url=success_url,
+        cancel_url=cancel_url,
+        line_item_name=reservation.service.name,
+    )
 
 
 def retrieve_checkout_session(session_id: str) -> dict[str, Any]:

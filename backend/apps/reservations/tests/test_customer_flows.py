@@ -34,8 +34,9 @@ class CustomerAccountTests(TestCase):
             "/api/auth/register/",
             {
                 "email": "newcust@example.com",
-                "username": "newcust",
-                "password": "strong-pw-9",
+                "confirm_email": "newcust@example.com",
+                "password": "Strong-pw-9",
+                "confirm_password": "Strong-pw-9",
                 "role": "customer",
             },
             format="json",
@@ -47,8 +48,9 @@ class CustomerAccountTests(TestCase):
             "/api/auth/register/",
             {
                 "email": "x@example.com",
-                "username": "x",
-                "password": "strong-pw-9",
+                "confirm_email": "x@example.com",
+                "password": "Strong-pw-9",
+                "confirm_password": "Strong-pw-9",
                 "role": "admin",  # not allowed via public register
             },
             format="json",
@@ -117,7 +119,9 @@ class DiscoveryTests(TestCase):
         make_service(shop=self.manila_shop, name="Haircut")
         response = self.client.get("/api/services/discover/?q=Haircut")
         self.assertEqual(response.status_code, 200)
-        results = response.json()
+        body = response.json()
+        results = body["results"]
+        self.assertEqual(body["count"], 2)
         self.assertEqual(len(results), 2)
         for row in results:
             self.assertIn("shop_name", row)
@@ -146,6 +150,50 @@ class BookingFlowTests(TestCase):
         )
         self.assertEqual(response.status_code, 200)
         self.assertGreater(len(response.json()), 0)
+
+    def test_availability_uses_shop_local_timezone(self):
+        """Regression: with TIME_ZONE=Asia/Manila and shop hours 09:00–17:00,
+        the first slot must be 09:00 local — not shifted by the UTC offset."""
+        from datetime import datetime, time, timedelta
+
+        from django.conf import settings
+        from django.utils import timezone
+
+        try:
+            from zoneinfo import ZoneInfo
+        except ImportError:  # pragma: no cover
+            from backports.zoneinfo import ZoneInfo
+
+        from apps.shops.models import WeekdayHours
+
+        WeekdayHours.objects.filter(shop=self.shop).update(
+            is_closed=False, open_time=time(9, 0), close_time=time(17, 0)
+        )
+
+        target = (timezone.now() + timedelta(days=2)).date()
+        response = self.client.get(
+            "/api/reservations/availability/",
+            {
+                "shop": self.shop.id,
+                "service": self.service.id,
+                "date": target.isoformat(),
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        results = response.json()
+        self.assertGreater(len(results), 0)
+
+        first_local = datetime.fromisoformat(results[0]["start_at"]).astimezone(
+            ZoneInfo(settings.TIME_ZONE)
+        )
+        self.assertEqual((first_local.hour, first_local.minute), (9, 0))
+
+        last_end_local = datetime.fromisoformat(results[-1]["end_at"]).astimezone(
+            ZoneInfo(settings.TIME_ZONE)
+        )
+        self.assertLessEqual(
+            (last_end_local.hour, last_end_local.minute), (17, 0)
+        )
 
     def test_book_creates_pending_reservation(self):
         response = self.client.post(

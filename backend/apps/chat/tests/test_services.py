@@ -5,6 +5,7 @@ from django.test import TestCase
 from apps.chat import services
 from apps.chat.models import ChatRoom, Message
 from apps.core.test_factories import make_customer, make_shop, make_shop_owner
+from apps.notifications.models import Notification
 from apps.shops.models import Shop
 
 
@@ -118,6 +119,45 @@ class UnreadTests(TestCase):
         self.assertEqual(
             services.unread_count_for_room(room=self.room, user=self.customer), 1
         )
+
+    def test_chat_notification_persists_for_recipient(self):
+        services.send_message(room=self.room, sender=self.owner, body="hello")
+        notifs = Notification.objects.filter(
+            user=self.customer, kind=Notification.Kind.CHAT_NEW_MESSAGE
+        )
+        self.assertEqual(notifs.count(), 1)
+        n = notifs.first()
+        self.assertEqual(n.body, "hello")
+        self.assertEqual(n.payload.get("room_id"), self.room.id)
+
+    def test_chat_notification_collapses_per_room_when_unread(self):
+        services.send_message(room=self.room, sender=self.owner, body="first")
+        services.send_message(room=self.room, sender=self.owner, body="second")
+        notifs = Notification.objects.filter(
+            user=self.customer, kind=Notification.Kind.CHAT_NEW_MESSAGE
+        )
+        # Two messages from same room collapse to one unread row.
+        self.assertEqual(notifs.count(), 1)
+        self.assertEqual(notifs.first().body, "second")
+
+    def test_chat_notification_inserts_new_row_after_previous_was_read(self):
+        services.send_message(room=self.room, sender=self.owner, body="first")
+        # Recipient acknowledges existing notification.
+        Notification.objects.filter(user=self.customer).update(read_at="2026-01-01T00:00:00Z")
+        services.send_message(room=self.room, sender=self.owner, body="second")
+        notifs = Notification.objects.filter(
+            user=self.customer, kind=Notification.Kind.CHAT_NEW_MESSAGE
+        )
+        # The read row stays as history; a new unread row is created.
+        self.assertEqual(notifs.count(), 2)
+        self.assertEqual(notifs.filter(read_at__isnull=True).count(), 1)
+
+    def test_chat_notification_not_created_for_sender(self):
+        services.send_message(room=self.room, sender=self.owner, body="hi")
+        owner_notifs = Notification.objects.filter(
+            user=self.owner, kind=Notification.Kind.CHAT_NEW_MESSAGE
+        )
+        self.assertEqual(owner_notifs.count(), 0)
 
     def test_total_unread_aggregates_across_rooms(self):
         # Second room, second shop

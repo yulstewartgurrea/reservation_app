@@ -33,6 +33,7 @@ services:
       sh -c "python manage.py makemigrations --noinput &&
              python manage.py migrate --noinput &&
              python manage.py seed_categories &&
+             python manage.py seed_psgc &&
              python manage.py runserver 0.0.0.0:8000"
     volumes:
       - ./backend:/app
@@ -71,22 +72,6 @@ services:
     depends_on:
       - db
       - redis
-
-  frontend:
-    build:
-      context: ./frontend
-      dockerfile: Dockerfile
-    command: npm run dev
-    volumes:
-      - ./frontend:/app
-      - /app/node_modules
-      - /app/.next
-    ports:
-      - "3000:3000"
-    environment:
-      - NEXT_PUBLIC_API_URL=http://localhost:8000
-    depends_on:
-      - web
 
 volumes:
   postgres_data:

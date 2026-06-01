@@ -7,4 +7,4 @@ When: {{ start_at|date:"l, F j" }} at {{ start_at|time:"g:i A" }}
 Address: {{ shop.address_line }}, {{ shop.city }}
 
 See you soon!
-— Reserva
+— BookMe

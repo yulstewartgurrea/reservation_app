@@ -12,6 +12,17 @@ locals {
   account_id  = local.global_vars.stage_account_id
 
   # ---------------------------------------------------------------------------
+  # SES (transactional email — signup OTPs, password resets, booking emails)
+  # ---------------------------------------------------------------------------
+  # While in SES sandbox (the default until you request production access),
+  # this address is both the only sender AND one of the only recipients you can
+  # send to. Add more recipients to `additional_verified_emails` for testing.
+  verified_email             = "yulgurz@gmail.com"
+  additional_verified_emails = []
+  from_email_display         = "BookMe <yulgurz@gmail.com>"
+  write_smtp_creds_to_ssm    = true
+
+  # ---------------------------------------------------------------------------
   # VPC
   # ---------------------------------------------------------------------------
   cidr                     = "10.244.0.0/20"
@@ -21,6 +32,10 @@ locals {
   public_subnets_newbits   = 2
   database_subnets_newbits = 2
   vpce_list                = ["logs", "ecr.api", "ecr.dkr", "s3"]
+  # Non-prod: IGW route on the database route table so the publicly_accessible
+  # RDS endpoint is reachable from allowlisted IPs (see rds_publicly_accessible
+  # / db_allowed_cidrs below). Access stays SG-gated. Keep false for prod.
+  create_database_internet_gateway_route = true
 
   # ---------------------------------------------------------------------------
   # ECS
@@ -38,7 +53,15 @@ locals {
   }
 
   base_image_name = "${local.project_name}/${local.env}/api"
-  container_image = "${local.account_id}.dkr.ecr.${local.aws_region}.amazonaws.com/${local.base_image_name}:latest"
+  # CI sets API_IMAGE_TAG to the short commit SHA on every deploy. Local applies fall back to
+  # `:latest` (which the first apply uses to bootstrap before CI is wired up).
+  api_image_tag   = get_env("API_IMAGE_TAG", "latest")
+  container_image = "${local.account_id}.dkr.ecr.${local.aws_region}.amazonaws.com/${local.base_image_name}:${local.api_image_tag}"
+
+  # S3 bucket holding user uploads (avatars, shop/service photos, chat
+  # attachments). Defined here so both the task IAM policy and the SSM
+  # parameter reference the same name.
+  media_bucket_name = "s3-${local.project_name}-${local.env}-media"
 
   # Common ECS task IAM policies — read app secrets/params from /reservation/* in this account.
   tasks_iam_role_statements = [
@@ -53,6 +76,21 @@ locals {
       resources = ["*"]
       effect    = "Allow"
       sid       = "KMSDecryptSecureStrings"
+    },
+    # Django uses these to upload, fetch, presign and delete user media.
+    # ListBucket is required by django-storages' file_overwrite=False check
+    # (it lists to confirm whether a key already exists before saving).
+    {
+      actions   = ["s3:PutObject", "s3:GetObject", "s3:DeleteObject"]
+      resources = ["arn:aws:s3:::${local.media_bucket_name}/*"]
+      effect    = "Allow"
+      sid       = "S3MediaObjects"
+    },
+    {
+      actions   = ["s3:ListBucket"]
+      resources = ["arn:aws:s3:::${local.media_bucket_name}"]
+      effect    = "Allow"
+      sid       = "S3MediaListBucket"
     }
   ]
 
@@ -83,23 +121,30 @@ locals {
     { name = "DJANGO_DEBUG", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/DJANGO_DEBUG" },
     { name = "DJANGO_ALLOWED_HOSTS", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/DJANGO_ALLOWED_HOSTS" },
     { name = "CORS_ALLOWED_ORIGINS", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/CORS_ALLOWED_ORIGINS" },
+    { name = "FRONTEND_URL", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/FRONTEND_URL" },
 
     { name = "DEFAULT_COMMISSION_RATE", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/DEFAULT_COMMISSION_RATE" },
     { name = "DEFAULT_CANCELLATION_WINDOW_HOURS", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/DEFAULT_CANCELLATION_WINDOW_HOURS" },
     { name = "STRIKE_LIMIT", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/STRIKE_LIMIT" },
     { name = "STRIKE_WINDOW_DAYS", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/STRIKE_WINDOW_DAYS" },
 
-    { name = "EMAIL_BACKEND", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/EMAIL_BACKEND" },
-    { name = "EMAIL_HOST", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/EMAIL_HOST" },
-    { name = "EMAIL_PORT", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/EMAIL_PORT" },
-    { name = "EMAIL_HOST_USER", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/EMAIL_HOST_USER" },
-    { name = "EMAIL_HOST_PASSWORD", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/EMAIL_HOST_PASSWORD" },
-    { name = "EMAIL_USE_TLS", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/EMAIL_USE_TLS" },
-    { name = "DEFAULT_FROM_EMAIL", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/DEFAULT_FROM_EMAIL" },
+    # Email — created and populated by the `ses` layer at /reservation/<env>/ses/*.
+    # Apply the ses layer BEFORE re-applying ecs after a fresh checkout (otherwise
+    # the task definition will fail to resolve these secrets).
+    { name = "EMAIL_BACKEND", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/email_backend" },
+    { name = "EMAIL_HOST", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/smtp_host" },
+    { name = "EMAIL_PORT", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/smtp_port" },
+    { name = "EMAIL_HOST_USER", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/smtp_username" },
+    { name = "EMAIL_HOST_PASSWORD", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/smtp_password" },
+    { name = "EMAIL_USE_TLS", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/email_use_tls" },
+    { name = "DEFAULT_FROM_EMAIL", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/default_from_email" },
 
     { name = "PAYMONGO_SECRET_KEY", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/PAYMONGO_SECRET_KEY" },
     { name = "PAYMONGO_PUBLIC_KEY", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/PAYMONGO_PUBLIC_KEY" },
     { name = "PAYMONGO_WEBHOOK_SECRET", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/PAYMONGO_WEBHOOK_SECRET" },
+
+    # Media — when set, Django uses S3Storage + presigned URLs.
+    { name = "AWS_STORAGE_BUCKET_NAME", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/AWS_STORAGE_BUCKET_NAME" },
   ]
 
   runtime_platform_x86 = {
@@ -206,16 +251,28 @@ locals {
   }
 
   # ---------------------------------------------------------------------------
-  # RDS (PostgreSQL 16 — matches local docker-compose)
+  # RDS (PostgreSQL 17 — Postgres 16.4 is no longer available in ap-southeast-1;
+  # 17.x is forward-compatible with the local docker-compose `postgres:16-alpine`
+  # for Django's purposes — only the engine major matters for app behavior.)
   # ---------------------------------------------------------------------------
   create_rds    = true
   create_aurora = false
+
+  # Non-prod convenience: expose RDS on a public endpoint so a local DB client
+  # (TablePlus, psql, local Django) can connect. Access is still gated by the
+  # security group — only the VPC and the IPs in db_allowed_cidrs get through.
+  # SECURITY: keep db_allowed_cidrs a tight /32 list. NEVER 0.0.0.0/0.
+  # Find your current public IP with:  curl -s https://checkip.amazonaws.com
+  # If your ISP rotates your IP you must update this and re-apply the rds layer.
+  rds_publicly_accessible = true
+  db_allowed_cidrs        = ["49.146.37.191/32"]
+
   rds_settings = {
     name                                  = "rds-${local.project_name}-${local.env}"
     engine                                = "postgres"
-    engine_version                        = "16.4"
-    family                                = "postgres16"
-    major_engine_version                  = "16"
+    engine_version                        = "17.4"
+    family                                = "postgres17"
+    major_engine_version                  = "17"
     instance_class                        = "db.t4g.micro"
     storage_type                          = "gp3"
     allocated_storage                     = 20
@@ -224,7 +281,7 @@ locals {
     username                              = "db_admin"
     port                                  = 5432
     multi_az                              = false
-    backup_window                         = "18:00-21:00"   # UTC — quiet for PH (02:00-05:00 PHT)
+    backup_window                         = "18:00-21:00" # UTC — quiet for PH (02:00-05:00 PHT)
     backup_retention_period               = 7
     maintenance_window                    = "Sun:21:00-Sun:23:00"
     enabled_cloudwatch_logs_exports       = ["postgresql"]
@@ -259,12 +316,32 @@ locals {
   }
 
   # ---------------------------------------------------------------------------
-  # S3 (media uploads — shop photos etc.)
+  # S3 (media uploads — avatars, shop photos, service images, chat attachments)
   # ---------------------------------------------------------------------------
+  # Stays private — the backend signs every read URL (6-hour expiry) so no
+  # public ACL / bucket policy is needed. See settings.py STORAGES["default"].
   bucket_names_private = [
-    "s3-${local.project_name}-${local.env}-media",
+    local.media_bucket_name,
   ]
   bucket_names_public = []
+
+  # ---------------------------------------------------------------------------
+  # Frontend hosting (S3 + CloudFront for the Next.js static export)
+  # ---------------------------------------------------------------------------
+  frontend_bucket_name = "s3-${local.project_name}-${local.env}-frontend"
+  # Custom domain. Cert + alias records are created automatically once the dns
+  # layer is applied and its zone_id flows in. Empty list = *.cloudfront.net only.
+  frontend_domains     = ["staging.bookme.ph"]
+  frontend_price_class = "PriceClass_100" # NA + EU only (cheapest tier)
+
+  # GitHub repo allowed to assume the deploy role via OIDC.
+  github_repo = "yulstewartgurrea/reservation_app"
+  # GitHub Environments allowed to deploy here. The workflow sets `environment: staging`,
+  # so the OIDC token's sub claim becomes `repo:OWNER/REPO:environment:staging` — we match on that.
+  github_environments = ["staging"]
+  # The OIDC provider for token.actions.githubusercontent.com already exists in this AWS account
+  # (likely from a previous project). Set to true on a fresh account where no provider exists.
+  create_oidc_provider = false
 
   # ---------------------------------------------------------------------------
   # Parameters & secrets (read from parameters/env.yaml)

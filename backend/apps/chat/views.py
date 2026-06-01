@@ -46,20 +46,44 @@ class ChatRoomViewSet(viewsets.ReadOnlyModelViewSet):
     def messages(self, request, pk=None):
         room = self.get_object()
         if request.method == "GET":
-            qs = Message.objects.filter(room=room).order_by("created_at")
-            page = self.paginate_queryset(qs)
-            ser = MessageSerializer(page or qs, many=True)
-            return self.get_paginated_response(ser.data) if page is not None else Response(ser.data)
-        # POST: send a message
+            # Chat pagination is "latest N, oldest at the top" — opening a room
+            # should always show the most recent messages, not the first 20 ever
+            # sent. We fetch the newest N by id (created_at), then reverse so
+            # the client renders them in chronological order. Use `?before=<id>`
+            # to walk further back.
+            try:
+                limit = max(1, min(int(request.query_params.get("limit", 50)), 200))
+            except (TypeError, ValueError):
+                limit = 50
+            qs = Message.objects.filter(room=room).order_by("-id")
+            before = request.query_params.get("before")
+            if before:
+                try:
+                    qs = qs.filter(id__lt=int(before))
+                except (TypeError, ValueError):
+                    pass
+            rows = list(qs[:limit])
+            rows.reverse()
+            ser = MessageSerializer(rows, many=True, context={"request": request})
+            return Response(ser.data)
+        # POST: send a message (multipart-aware so clients can attach files)
         s = SendMessageSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         try:
-            msg = services.send_message(room=room, sender=request.user, body=s.validated_data["body"])
+            msg = services.send_message(
+                room=room,
+                sender=request.user,
+                body=s.validated_data.get("body", ""),
+                attachment=s.validated_data.get("attachment"),
+            )
         except ValueError as exc:
             raise ValidationError(str(exc))
         except PermissionError as exc:
             raise PermissionDenied(str(exc))
-        return Response(MessageSerializer(msg).data, status=status.HTTP_201_CREATED)
+        return Response(
+            MessageSerializer(msg, context={"request": request}).data,
+            status=status.HTTP_201_CREATED,
+        )
 
     @action(detail=True, methods=["post"], url_path="read")
     def mark_read(self, request, pk=None):

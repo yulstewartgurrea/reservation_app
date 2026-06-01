@@ -1,0 +1,9 @@
+Hi {{ customer_name }},
+
+A friendly reminder from {{ shop.name }}: it's been about {{ reminder.interval_months }} month(s) since your last service, so {{ reminder.title }} is due.
+
+{% if reminder.message %}{{ reminder.message }}
+
+{% endif %}Book here: {{ frontend_url }}/shops/{{ shop.id }}
+
+— BookMe

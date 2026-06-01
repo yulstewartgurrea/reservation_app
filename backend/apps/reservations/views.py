@@ -2,7 +2,7 @@ from rest_framework import permissions, status, viewsets
 from rest_framework.decorators import action
 from rest_framework.response import Response
 
-from .availability import compute_slots
+from .availability import compute_slots_any
 from .models import Reservation
 from .serializers import (
     AvailabilityRequestSerializer,
@@ -68,7 +68,10 @@ class ReservationViewSet(viewsets.ModelViewSet):
         serializer = AvailabilityRequestSerializer(data=request.query_params)
         serializer.is_valid(raise_exception=True)
         d = serializer.validated_data
-        slots = compute_slots(d["shop"], d["service"], d.get("staff"), d["date"])
+        quantity = d.get("quantity", 1)
+        # Availability is resource-capacity based. A requested `staff` (if sent)
+        # is non-binding and never narrows the offered times.
+        slots = compute_slots_any(d["shop"], d["service"], d["date"], quantity)
         return Response([
             {"start_at": s.start_at.isoformat(), "end_at": s.end_at.isoformat()}
             for s in slots
@@ -113,7 +116,14 @@ class ReservationViewSet(viewsets.ModelViewSet):
         if new_start is None:
             return Response({"detail": "start_at is required (ISO datetime)."}, status=400)
 
-        _reschedule(reservation=reservation, new_start=new_start, actor=request.user)
+        raw_qty = request.data.get("quantity")
+        new_qty = int(raw_qty) if raw_qty not in (None, "") else None
+        _reschedule(
+            reservation=reservation,
+            new_start=new_start,
+            actor=request.user,
+            quantity=new_qty,
+        )
         return Response(ReservationDetailSerializer(reservation).data)
 
     @action(detail=True, methods=["post"], url_path="cancel")

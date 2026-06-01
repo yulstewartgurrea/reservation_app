@@ -32,6 +32,7 @@ export function ChatBadge() {
   return (
     <Link
       href="/chat"
+      onClick={() => setUnread(0)}
       className="relative rounded p-2 hover:bg-slate-100"
       aria-label="Chats"
     >

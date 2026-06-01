@@ -1,31 +1,34 @@
 "use client";
 
+/**
+ * Photo-forward service card used in the shop dashboard grid.
+ *
+ * Visual anatomy (top to bottom):
+ * 1. Cover image (or themed placeholder)
+ *    - Top-left: status pill (Active / Inactive)
+ *    - Top-right: "more" kebab menu — contains Edit + Delete
+ * 2. Title, price · duration, optional 2-line description
+ *
+ * All actions are consolidated into the kebab menu so the body of the card
+ * stays focused on identification (image + name + price).
+ */
+
 import Link from "next/link";
-import { Pencil, Trash2 } from "lucide-react";
+import { useEffect, useRef, useState } from "react";
+import { MoreHorizontal, Pencil, Trash2 } from "lucide-react";
 import { iconForService } from "@/lib/serviceIcons";
 
 export type ServiceCardData = {
   id: number;
   name: string;
-  /** Legacy single-photo field (kept for backwards compat). */
-  photo?: string | null;
-  /** Preferred: first gallery image, falls back to legacy `photo` server-side. */
+  description?: string;
+  /** Primary gallery photo (or first if none flagged). Null if no photos at all. */
   cover_photo?: string | null;
   duration_minutes: number;
   price: string;
   is_active: boolean;
 };
 
-/**
- * Airbnb-style photo-forward service card.
- *
- * Layout: full-bleed image on top (square-ish), small status/category pill in
- * the top-left, title below, single-line "$price · duration" beneath, and a
- * compact action row at the bottom.
- *
- * When the service has no uploaded photo, we render a colored block with the
- * service-themed icon — same trick `ShopCard` uses for missing covers.
- */
 export function ServiceCard({
   service,
   editHref,
@@ -35,69 +38,118 @@ export function ServiceCard({
   editHref: string;
   onDelete: () => void;
 }) {
-  const cover = service.cover_photo ?? service.photo ?? null;
+  const cover = service.cover_photo ?? null;
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  // Close the kebab menu on outside-click and on Escape.
+  useEffect(() => {
+    if (!menuOpen) return;
+    function onClick(e: MouseEvent) {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    }
+    function onKey(e: KeyboardEvent) {
+      if (e.key === "Escape") setMenuOpen(false);
+    }
+    document.addEventListener("mousedown", onClick);
+    document.addEventListener("keydown", onKey);
+    return () => {
+      document.removeEventListener("mousedown", onClick);
+      document.removeEventListener("keydown", onKey);
+    };
+  }, [menuOpen]);
 
   return (
     <li className="overflow-hidden rounded-2xl border border-slate-100 bg-white shadow-sm transition hover:shadow-md">
-      <Link href={editHref} className="block">
-        <div className="relative aspect-[4/3] w-full overflow-hidden bg-slate-100">
+      <div className="relative aspect-[4/3] w-full overflow-hidden bg-slate-100">
+        <Link href={editHref} className="block h-full w-full">
           {cover ? (
             // eslint-disable-next-line @next/next/no-img-element
             <img
               src={cover}
               alt={service.name}
-              className="h-full w-full object-cover transition group-hover:scale-105"
+              className="h-full w-full object-cover"
             />
           ) : (
             <ServicePlaceholder name={service.name} />
           )}
-          <span
-            className={`absolute left-3 top-3 rounded-full px-2.5 py-1 text-xs font-medium shadow-sm ${
-              service.is_active
-                ? "bg-white text-slate-900"
-                : "bg-slate-900/80 text-white"
-            }`}
-          >
-            {service.is_active ? "Active" : "Inactive"}
-          </span>
-        </div>
-      </Link>
+        </Link>
 
-      <div className="px-4 pt-3">
+        {/* Status pill — top-left */}
+        <span
+          className={`absolute left-3 top-3 rounded-full px-2.5 py-1 text-xs font-medium shadow-sm ${
+            service.is_active ? "bg-emerald-100 text-emerald-700" : "bg-slate-900/80 text-white"
+          }`}
+        >
+          {service.is_active ? "Active" : "Inactive"}
+        </span>
+
+        {/* Kebab — top-right */}
+        <div ref={menuRef} className="absolute right-3 top-3">
+          <button
+            type="button"
+            aria-label="More options"
+            aria-haspopup="menu"
+            aria-expanded={menuOpen}
+            onClick={() => setMenuOpen((v) => !v)}
+            className="inline-flex h-8 w-8 items-center justify-center rounded-md bg-white text-slate-600 shadow-sm hover:bg-slate-50"
+          >
+            <MoreHorizontal size={16} />
+          </button>
+          {menuOpen && (
+            <div
+              role="menu"
+              className="absolute right-0 top-full z-10 mt-1 w-36 overflow-hidden rounded-md border border-slate-200 bg-white shadow-lg"
+            >
+              <Link
+                role="menuitem"
+                href={editHref}
+                onClick={() => setMenuOpen(false)}
+                className="flex items-center gap-2 px-3 py-2 text-sm text-slate-700 hover:bg-slate-50"
+              >
+                <Pencil size={14} />
+                Edit
+              </Link>
+              <button
+                type="button"
+                role="menuitem"
+                onClick={() => {
+                  setMenuOpen(false);
+                  onDelete();
+                }}
+                className="flex w-full items-center gap-2 px-3 py-2 text-sm text-red-700 hover:bg-red-50"
+              >
+                <Trash2 size={14} />
+                Delete
+              </button>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="space-y-1 px-4 py-4">
         <Link
           href={editHref}
           className="block truncate text-base font-semibold text-slate-900 hover:underline"
         >
           {service.name}
         </Link>
-        <p className="mt-0.5 text-sm text-slate-600">
+        <p className="text-sm text-slate-600">
           <span className="font-medium text-slate-900">${service.price}</span>
           <span className="mx-1.5 text-slate-300">·</span>
           {service.duration_minutes} min
         </p>
-      </div>
-
-      <div className="mt-3 flex items-center gap-2 px-4 pb-4">
-        <Link
-          href={editHref}
-          className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-slate-200 px-3 py-1.5 text-sm font-medium text-slate-700 hover:bg-slate-50"
-        >
-          <Pencil size={14} />
-          Edit
-        </Link>
-        <button
-          onClick={onDelete}
-          className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-md border border-red-200 px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50"
-        >
-          <Trash2 size={14} />
-          Delete
-        </button>
+        {service.description && (
+          <p className="line-clamp-2 text-sm text-slate-500">{service.description}</p>
+        )}
       </div>
     </li>
   );
 }
 
-/** Placeholder for services without an uploaded photo. */
+/** Themed placeholder shown when a service has no uploaded cover photo. */
 function ServicePlaceholder({ name }: { name: string }) {
   const Icon = iconForService(name);
   const palette = [

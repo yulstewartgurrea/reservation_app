@@ -32,8 +32,9 @@ class ShopOwnerAccountTests(TestCase):
             "/api/auth/register/",
             {
                 "email": "owner@example.com",
-                "username": "owner",
-                "password": "strong-pw-9",
+                "confirm_email": "owner@example.com",
+                "password": "Strong-pw-9",
+                "confirm_password": "Strong-pw-9",
                 "role": "shop_owner",
                 "first_name": "Olivia",
                 "last_name": "Owner",
@@ -116,7 +117,7 @@ class MultiShopOwnershipTests(TestCase):
         make_shop(name="Someone Else's")  # different owner
         response = self.client.get("/api/shops/mine/")
         self.assertEqual(response.status_code, 200)
-        ids = {row["id"] for row in response.json()}
+        ids = {row["id"] for row in response.json()["results"]}
         self.assertIn(mine.id, ids)
         self.assertEqual(len(ids), 1)
 
@@ -142,10 +143,46 @@ class MultiShopOwnershipTests(TestCase):
         make_shop(owner=self.owner, name="Mine")
         response = self.client.get("/api/shops/mine/")
         self.assertEqual(response.status_code, 200)
-        rows = response.json()
+        rows = response.json()["results"]
         self.assertEqual(len(rows), 1)
         self.assertIn("cover_photo", rows[0])
         self.assertIsNone(rows[0]["cover_photo"])
+
+    def test_photo_list_returns_absolute_image_urls(self):
+        """The photos page renders <img src> directly, so URLs must be absolute
+        — otherwise the browser resolves them against the frontend origin and 404s."""
+        shop = make_shop(owner=self.owner)
+        ShopPhoto.objects.create(shop=shop, image="shops/cover.png", sort_order=0)
+        response = self.client.get(f"/api/shops/{shop.id}/photos/")
+        self.assertEqual(response.status_code, 200)
+        rows = response.json()
+        self.assertEqual(len(rows), 1)
+        self.assertTrue(rows[0]["image"].startswith("http"), rows[0]["image"])
+
+    def test_set_cover_photo_promotes_target_to_sort_order_zero(self):
+        """The cover endpoint moves the chosen photo to the front and renumbers the rest."""
+        shop = make_shop(owner=self.owner)
+        a = ShopPhoto.objects.create(shop=shop, image="shops/a.png", sort_order=0)
+        b = ShopPhoto.objects.create(shop=shop, image="shops/b.png", sort_order=1)
+        c = ShopPhoto.objects.create(shop=shop, image="shops/c.png", sort_order=2)
+        response = self.client.post(f"/api/shops/{shop.id}/photos/{c.id}/cover/")
+        self.assertEqual(response.status_code, 200, response.content)
+        a.refresh_from_db()
+        b.refresh_from_db()
+        c.refresh_from_db()
+        self.assertEqual(c.sort_order, 0)
+        # a and b keep their relative order but are renumbered 1, 2.
+        self.assertEqual(a.sort_order, 1)
+        self.assertEqual(b.sort_order, 2)
+
+    def test_set_cover_photo_rejects_non_owner(self):
+        shop = make_shop(owner=self.owner)
+        photo = ShopPhoto.objects.create(shop=shop, image="shops/x.png", sort_order=0)
+        outsider = make_shop_owner()
+        client = APIClient()
+        client.force_authenticate(outsider)
+        response = client.post(f"/api/shops/{shop.id}/photos/{photo.id}/cover/")
+        self.assertEqual(response.status_code, 403)
 
 
 class HoursManagementTests(TestCase):
@@ -286,6 +323,40 @@ class StaffManagementTests(TestCase):
             f"/api/shops/staff/{staff.id}/hours/", rows, format="json"
         )
         self.assertEqual(response.status_code, 200)
+
+    def test_add_staff_with_phone_and_email(self):
+        response = self.client.post(
+            "/api/shops/staff/",
+            {
+                "shop": self.shop.id,
+                "name": "Maria",
+                "role": "Stylist",
+                "phone": "+63-917-555-1212",
+                "email": "maria@example.com",
+                "is_active": True,
+            },
+            format="json",
+        )
+        self.assertEqual(response.status_code, 201, response.content)
+        body = response.json()
+        self.assertEqual(body["phone"], "+63-917-555-1212")
+        self.assertEqual(body["email"], "maria@example.com")
+
+    def test_staff_stats_aggregates_active_and_inactive(self):
+        Staff.objects.create(shop=self.shop, name="A", is_active=True)
+        Staff.objects.create(shop=self.shop, name="B", is_active=True)
+        Staff.objects.create(shop=self.shop, name="C", is_active=False)
+        response = self.client.get(f"/api/shops/staff/stats/?shop={self.shop.id}")
+        self.assertEqual(response.status_code, 200)
+        body = response.json()
+        self.assertEqual(body, {"total": 3, "active": 2, "inactive": 1})
+
+    def test_staff_stats_rejects_non_owner(self):
+        outsider = make_shop_owner()
+        client = APIClient()
+        client.force_authenticate(outsider)
+        response = client.get(f"/api/shops/staff/stats/?shop={self.shop.id}")
+        self.assertEqual(response.status_code, 403)
 
 
 class ReservationInboxTests(TestCase):

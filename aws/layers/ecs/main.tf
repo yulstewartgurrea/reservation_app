@@ -1,3 +1,11 @@
+# AWS-managed prefix list of CloudFront origin-facing IPs. CloudFront VPC Origin
+# requests reach the internal ALB sourced from these IPs (not the VPC origin
+# ENI's private IP), so the ALB SG must allow this prefix list — otherwise every
+# CloudFront → /api/* call hits the 30s origin timeout and returns 504.
+data "aws_ec2_managed_prefix_list" "cloudfront_origin_facing" {
+  name = "com.amazonaws.global.cloudfront.origin-facing"
+}
+
 ################################################################################
 # Cluster
 ################################################################################
@@ -51,6 +59,13 @@ module "alb_internal" {
       protocol    = "tcp"
       description = "HTTP from VPC"
       cidr_ipv4   = var.vpc.vpc_cidr_block
+    }
+    ingress_cloudfront_origin_facing = {
+      from_port      = 80
+      to_port        = 80
+      ip_protocol    = "tcp"
+      description    = "HTTP from CloudFront origin-facing (VPC origins)"
+      prefix_list_id = data.aws_ec2_managed_prefix_list.cloudfront_origin_facing.id
     }
   }
 

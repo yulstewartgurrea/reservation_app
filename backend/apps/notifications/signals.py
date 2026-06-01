@@ -14,7 +14,7 @@ def on_reservation_created(sender, instance: Reservation, created: bool, **kwarg
     if not created:
         return
 
-    from apps.reservations.tasks import send_booking_confirmation_email, schedule_reminders
+    from apps.reservations.tasks import send_booking_confirmation_email
 
     when = instance.start_at.strftime("%Y-%m-%d %H:%M")
 
@@ -24,7 +24,7 @@ def on_reservation_created(sender, instance: Reservation, created: bool, **kwarg
             kind=Notification.Kind.BOOKING_NEW,
             title=f"New booking: {instance.service.name}",
             body=f"{_who(instance)} at {when}",
-            payload={"reservation_id": instance.id},
+            payload={"reservation_id": instance.id, "shop_id": instance.shop_id},
         )
         if instance.customer_id:
             push_to_user(
@@ -32,10 +32,11 @@ def on_reservation_created(sender, instance: Reservation, created: bool, **kwarg
                 kind=Notification.Kind.BOOKING_NEW,
                 title=f"Booking requested at {instance.shop.name}",
                 body=f"{instance.service.name} — {when}",
-                payload={"reservation_id": instance.id},
+                payload={"reservation_id": instance.id, "shop_id": instance.shop_id},
             )
             send_booking_confirmation_email.delay(instance.id)
-            schedule_reminders.delay(instance.id)
+            # 24h / 1h reminders are handled by the periodic Beat scanner
+            # (apps.reservations.tasks.dispatch_due_reminders).
 
 
 @receiver(post_save, sender=ReservationStatusHistory)
@@ -60,7 +61,11 @@ def on_status_change(sender, instance: ReservationStatusHistory, created: bool, 
 
     title = f"{reservation.shop.name}: {to_status.replace('_', ' ')}"
     body = f"{reservation.service.name} — {when}"
-    payload = {"reservation_id": reservation.id, "status": to_status}
+    payload = {
+        "reservation_id": reservation.id,
+        "shop_id": reservation.shop_id,
+        "status": to_status,
+    }
 
     if reservation.customer_id:
         push_to_user(
@@ -70,6 +75,15 @@ def on_status_change(sender, instance: ReservationStatusHistory, created: bool, 
             body=body,
             payload=payload,
         )
+        # Email receipts on shop-driven lifecycle steps.
+        if to_status == Reservation.Status.CONFIRMED:
+            from apps.reservations.tasks import send_booking_confirmed_email
+
+            send_booking_confirmed_email.delay(reservation.id)
+        elif to_status == Reservation.Status.COMPLETED:
+            from apps.reservations.tasks import send_booking_completed_email
+
+            send_booking_completed_email.delay(reservation.id)
     push_to_shop(
         shop=reservation.shop,
         kind=kind,

@@ -1,0 +1,14 @@
+Hi {{ customer_name }},
+
+{{ shop.name }} has confirmed your appointment. Here's your receipt:
+
+Service: {{ service.name }}
+When: {{ start_at|date:"l, F j, Y" }} at {{ start_at|time:"g:i A" }}
+Duration: {{ service.duration_minutes }} minutes
+Total: PHP {{ total_price }} ({{ payment_label }})
+
+Address: {{ shop.address_line }}, {{ shop.city }}
+
+You can manage this booking at: {{ frontend_url }}/reservations
+
+— BookMe

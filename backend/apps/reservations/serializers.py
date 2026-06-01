@@ -4,10 +4,9 @@ from django.conf import settings
 from rest_framework import serializers
 
 from apps.services.models import Service
-from apps.shops.models import Shop, Staff
+from apps.shops.models import Resource, Shop, Staff
 
-from .availability import compute_slots
-from .models import Reservation
+from .models import CommissionInvoice, Reservation
 
 
 class ReservationListSerializer(serializers.ModelSerializer):
@@ -17,6 +16,7 @@ class ReservationListSerializer(serializers.ModelSerializer):
         source="service.duration_minutes", read_only=True
     )
     staff_name = serializers.SerializerMethodField()
+    resource_name = serializers.CharField(source="resource.name", read_only=True, default=None)
     payment_status = serializers.SerializerMethodField()
     customer_name = serializers.SerializerMethodField()
     customer_email = serializers.SerializerMethodField()
@@ -35,10 +35,14 @@ class ReservationListSerializer(serializers.ModelSerializer):
             "service_duration_minutes",
             "staff",
             "staff_name",
+            "resource",
+            "resource_name",
             "start_at",
             "end_at",
             "status",
             "source",
+            "quantity",
+            "unit_price",
             "total_price",
             "payment_method",
             "payment_status",
@@ -80,7 +84,10 @@ class ReservationDetailSerializer(serializers.ModelSerializer):
         fields = "__all__"
         read_only_fields = (
             "customer",
+            "resource",
             "end_at",
+            "quantity",
+            "unit_price",
             "total_price",
             "commission_amount",
             "status",
@@ -100,6 +107,7 @@ class CustomerBookingSerializer(serializers.Serializer):
         queryset=Staff.objects.all(), required=False, allow_null=True
     )
     start_at = serializers.DateTimeField()
+    quantity = serializers.IntegerField(required=False, min_value=1, default=1)
     customer_notes = serializers.CharField(required=False, allow_blank=True, default="")
     payment_method = serializers.ChoiceField(
         choices=("pay_on_arrival", "online"),
@@ -122,7 +130,11 @@ class WalkInSerializer(serializers.Serializer):
     staff = serializers.PrimaryKeyRelatedField(
         queryset=Staff.objects.all(), required=False, allow_null=True
     )
+    resource = serializers.PrimaryKeyRelatedField(
+        queryset=Resource.objects.all(), required=False, allow_null=True
+    )
     start_at = serializers.DateTimeField()
+    quantity = serializers.IntegerField(required=False, min_value=1, default=1)
     customer_id = serializers.IntegerField(required=False, allow_null=True)
     guest_name = serializers.CharField(required=False, allow_blank=True, default="")
     guest_phone = serializers.CharField(required=False, allow_blank=True, default="")
@@ -132,9 +144,43 @@ class WalkInSerializer(serializers.Serializer):
             raise serializers.ValidationError("Service does not belong to this shop.")
         if attrs.get("staff") and attrs["staff"].shop_id != attrs["shop"].id:
             raise serializers.ValidationError("Staff does not belong to this shop.")
+        if attrs.get("resource") and attrs["resource"].shop_id != attrs["shop"].id:
+            raise serializers.ValidationError("Resource does not belong to this shop.")
         if not attrs.get("customer_id") and not attrs.get("guest_name"):
             raise serializers.ValidationError("Provide either customer_id or guest_name.")
         return attrs
+
+
+class CommissionInvoiceSerializer(serializers.ModelSerializer):
+    shop_name = serializers.CharField(source="shop.name", read_only=True)
+    is_overdue = serializers.SerializerMethodField()
+
+    class Meta:
+        model = CommissionInvoice
+        fields = [
+            "id",
+            "shop",
+            "shop_name",
+            "period",
+            "amount",
+            "status",
+            "issued_at",
+            "due_date",
+            "paid_at",
+            "settled_offline",
+            "payment_url",
+            "is_overdue",
+            "created_at",
+        ]
+        read_only_fields = fields
+
+    def get_is_overdue(self, obj) -> bool:
+        from django.utils import timezone
+
+        return (
+            obj.status == CommissionInvoice.Status.OPEN
+            and obj.due_date < timezone.now().date()
+        )
 
 
 class AvailabilityRequestSerializer(serializers.Serializer):
@@ -144,3 +190,14 @@ class AvailabilityRequestSerializer(serializers.Serializer):
         queryset=Staff.objects.all(), required=False, allow_null=True
     )
     date = serializers.DateField()
+    quantity = serializers.IntegerField(required=False, min_value=1, default=1)
+
+    def validate(self, attrs):
+        service = attrs["service"]
+        quantity = attrs.get("quantity", 1)
+        if quantity > service.max_quantity:
+            raise serializers.ValidationError(
+                f"Quantity exceeds the maximum of {service.max_quantity} "
+                "for this service."
+            )
+        return attrs

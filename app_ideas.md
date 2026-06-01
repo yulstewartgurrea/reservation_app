@@ -241,7 +241,9 @@ With branches: `cancelled_by_customer`, `cancelled_by_shop`, `no_show`, `resched
 - ✅ Per-shop analytics endpoint + dashboard page (revenue, completion + no-show rate, top services)
 - ✅ Code-quality round: shared `core/emails.py`, `HoursEditor` + `SlotPicker` components, `formatApiError` helper, configurable `FRONTEND_URL`
 - ✅ Test coverage: payments lifecycle + webhook signing, account tokens, shop hours + availability overrides
-- ✅ Customer ↔ shop chat (real-time via Channels, edit messages, mark-unread-from, per-room unread badges + global nav badge) — see §8.13 for design notes
+- ✅ Customer ↔ shop chat (real-time via Channels, edit messages, mark-unread-from, per-room unread badges + global nav badge) — see §8.14 for design notes
+- ✅ Live typing indicator + online presence on the chat list and inside a conversation (Redis-backed TTL'd presence; fan-out scoped to chat peers)
+- ✅ Monthly commission invoicing + collection (uniform 15%, PayMongo link or admin offline-settle, dunning + auto-pause/resume) — see §8.3.1
 - ⏳ Deposits / customer-initiated refunds
 - ⏳ SMS reminders (Twilio)
 - ⏳ Native mobile app (React Native, sharing the API)
@@ -260,9 +262,19 @@ No online payments in v1. **Pay on arrival** only. Stripe integration is deferre
 
 ### 8.3 Monetization (commission)
 - **Commission-based.** The platform takes a percentage of each completed reservation's total price.
-- Platform default commission rate, with per-shop override (admin-set, e.g. for promotional deals).
-- Recorded per reservation in `CommissionLedger`. Since there's no online payment in v1, settlement happens off-platform (admin invoices the shop monthly).
+- **Default rate: 15%** (`DEFAULT_COMMISSION_RATE`). Rationale: sits well below the 20–30% PH marketplace norm (Grab/Foodpanda) so it stays an easy sell to shops during acquisition, while still netting ~10–11% after the worst-case PayMongo card fee (~3.5% + ₱15) on online-paid bookings and the full 15% on pay-on-arrival. Chosen over a flat 10% (too thin once the payment mix skews to cards) and over a tiered online/pay-on-arrival engine (unnecessary — the per-shop override already covers every special case).
+- Platform default commission rate, with per-shop override (admin-set). The override is the **growth lever**: set `Shop.commission_rate = 0` for a new shop's intro period or for negotiated/enterprise deals — no code change, no tiered logic.
+- Recorded per reservation in `CommissionLedger`.
 - Commission only applies to reservations marked `completed` — not cancelled / no-show / walk-in (walk-ins handled separately, see 8.6).
+
+#### 8.3.1 Collection model — monthly invoice (uniform, not hybrid)
+**Decision: one uniform invoice per shop per month covering ALL of that shop's commission for the period, regardless of payment method.** Deliberately *not* the hybrid model (withhold from online-paid payouts + invoice only cash) — the hybrid is more economically precise but doubles the surface area (payout statements, fee reconciliation, two collection paths). At this stage uniform-and-simple wins; the per-shop override already absorbs special cases.
+
+- A `CommissionInvoice` (shop, `period` `YYYY-MM`, amount, status `open`/`paid`/`void`, `due_date`, `paid_at`, `settled_offline`) rolls up the period's unsettled `CommissionLedger` rows. Settling an invoice (online **or** offline) stamps `settled_at` on those rows — the ledger stays the source of truth for "what's been collected."
+- **Generation:** Beat task on the 1st of each month bills the *previous* calendar month. Idempotent — re-running refreshes an open invoice's amount and never mutates a `paid`/`void` one. Admin can also trigger generation manually.
+- **Payment:** shop owner pays via a PayMongo link (the existing platform PayMongo account — same provider, no Connect/split); the webhook reconciles. Admin can alternatively mark an invoice **settled offline** for bank-transfer / GCash payments made out-of-band — same ledger effect. (Many PH shops will pay off-platform; the offline path is a first-class action, not an afterthought.)
+- **Dunning has teeth:** `COMMISSION_INVOICE_DUE_DAYS` (default 7) to pay; then `COMMISSION_INVOICE_GRACE_DAYS` (default 7) of escalating reminders; then the shop is **auto-paused** (drops out of search/booking via the existing `Shop.status = PAUSED`, tagged with `auto_paused_for_unpaid_commission`). Paying auto-resumes — but only shops the *platform* paused; a manual owner pause is never clobbered, and the owner can't self-clear the billing pause via `publish`.
+- **Disclosure:** the 15% service fee + monthly-invoice model is shown non-dismissably on the shop-create flow so the first invoice is never a surprise.
 
 ### 8.4 Cancellation policy
 **Pattern: platform default + per-shop override + strike system** (no fees, since no online payments).
@@ -286,6 +298,14 @@ No online payments in v1. **Pay on arrival** only. Stripe integration is deferre
 - **Shop side:** when registering a shop, the address is geocoded to lat/lng (server-side, e.g. via Nominatim/Mapbox). Stored on `Shop.latitude` / `Shop.longitude`.
 - **v1 query approach:** **bounding-box + Haversine** in raw SQL — avoids the PostGIS dependency. Good enough for radius search at our scale.
 - **Phase 2:** migrate to PostGIS (`ST_DWithin`, `geography` type) once the radius query becomes a hotspot or we need polygon/region features.
+
+#### 8.5.1 PSGC location master DB (`apps.locations`)
+- **Why:** structured PH address entry needs canonical region → province → city/municipality → barangay data with stable codes, so shop addresses are normalized and searchable rather than free-text.
+- **Source:** the full PSGC hierarchy ships in-app at `apps/locations/data/psgc_hierarchy.json` (copied from repo-root `data/psgc/` — the repo-root `data/` folder is NOT mounted into the container/ECS, so the seed reads the in-app copy). 17 regions / 87 provinces / 1648 cities-municipalities / 42046 barangays.
+- **Models:** `Region`, `Province`, `CityMunicipality`, `Barangay` — all keyed on the PSGC `code` as a **CharField PK** (codes are zero-padded strings; never an IntegerField). FK chain cascades downward.
+- **Seed:** `manage.py seed_psgc` → `services.seed_psgc(force=False)`. Idempotent (skips if barangays exist); `--force` wipes + reseeds. Uses `bulk_create(batch_size=2000)` inside `@transaction.atomic` (not `update_or_create` — that's ~44k queries). Wired into `web` startup after `seed_categories`; the idempotency means it only does heavy work once.
+- **API:** read-only, public (`AllowAny`), unpaginated cascading lookups under `/api/locations/` — `provinces/`, `cities/?province=<code>`, `barangays/?city=<code>` (child params required → 400). Frontend owns the dropdown UX; this is the data contract behind it.
+- **Shop linkage:** `Shop` gets denormalized `province_code` / `city_code` / `barangay_code` (CharFields, NOT FKs) alongside the existing human-readable `state_province` / `city` / `barangay` name fields. Denormalized-by-design: the name fields stay authoritative for display and never break if PSGC data is re-versioned; the codes enable structured filtering/joins.
 
 ### 8.6 Walk-ins
 **Pattern: manual booking by shop owner** (the 80% solution; reuses the Reservation model).
@@ -320,7 +340,13 @@ No online payments in v1. **Pay on arrival** only. Stripe integration is deferre
 - **Refunds (deferred):** PayMongo supports refunds via API but a full refund policy / partial refund flow is Phase 3.
 - **Currency:** PHP only in v1 (PayMongo's only supported currency).
 
-### 8.13 Chat (customer ↔ shop)
+### 8.13 Notifications — email-only, SMS deferred
+- **Email is the universal channel.** Signup verification (6-digit OTP), booking confirmations, 24h + 1h appointment reminders, and shop-owner maintenance reminders all go through Django's email pipeline. Free, no per-message cost, and works for every user with a registered email.
+- **Why SMS is deferred:** Even PH-native providers (Semaphore, PhilSMS) cost ₱0.50+/SMS; Twilio is ~5× that. At commission-only margins, eating SMS cost for reminders is a no-go. If a shop later asks for SMS, the right shape is a prepaid credit wallet they top up — the platform passes through cost + a small markup. WhatsApp Cloud API (Meta) is the most likely first-paid-channel since 1k service conversations/month are free and PH adoption is high.
+- **Signup OTP, not link.** Plain 6-digit code emailed at registration (10-min TTL, 5-attempt cap, 60s resend cooldown, hashed at rest). Verify endpoint returns JWT pair on success — one round-trip from signup to logged-in. The legacy link-based `verify-email` endpoint stays for backwards compatibility.
+- **Maintenance reminders are shop-owned, customer-targeted.** Shop owner creates a `MaintenanceReminder` (customer email, service, title, `interval_months`, `next_due_at`). Hourly Beat task dispatches due reminders by email + in-app `Notification`, then advances `next_due_at` by `interval_months`. Customer must be a registered Reserva user to receive one (no cold outreach).
+
+### 8.14 Chat (customer ↔ shop)
 - **One conversation per (customer, shop) pair.** No group chats, no DMs between customers. The shop owner replies as themselves; multiple owners are out of scope (one owner per shop in v1).
 - **Customer initiates.** A "Chat" button on the active shop's detail page opens or re-opens the room (idempotent get-or-create). Shop owners cannot start cold conversations.
 - **Storage stays in Postgres** even though chat is the highest-write surface. At this app's scale this is fine — Discord ran chat on Postgres for billions of messages before sharding. The index `(room_id, created_at)` keeps the message-list query trivial.
@@ -330,7 +356,42 @@ No online payments in v1. **Pay on arrival** only. Stripe integration is deferre
 - **Reads are tracked by a per-user cursor** (`ChatParticipant.last_read_message`) pointing at the highest message seen. Unread = messages in the room past the cursor that the user didn't send. This is cheaper than per-message read receipts and makes "mark unread" trivial.
 - **"Mark unread from here" rewinds the cursor** to the predecessor of the chosen message (or null if it's the first message in the room). The target and everything after re-enter the unread tally — and the room jumps back to the top of the chat list.
 - **Edits are allowed indefinitely; soft-delete is in the model but no UI yet.** Edit sets `edited_at`; the body cannot become empty. Only the sender can edit (enforced in the service layer).
-- **Writes always go through REST.** The WebSocket is read-only (broadcasts only). Keeps auth + validation in one place and avoids state divergence between socket and REST clients.
+- **Writes always go through REST.** The chat WebSocket is broadcast-only for persistent state (messages, edits, read cursor). The one upstream message we accept is `{type: "typing"}` — it's transient by definition and carries no data worth durably storing, so the round-trip-via-REST cost is not justified.
+- **Online presence is Redis-backed.** A connected `UserNotificationConsumer` sets `presence:user:<id>` with a 60s TTL and refreshes it every 25s. On disconnect we wait a 5s grace period (absorbs page navigations and reloads) and then check whether *another* of the user's sockets has refreshed the key — only if no socket is left does the user flip offline. Presence transitions fan out as `presence.update` events to every chat peer (users sharing at least one `ChatRoom`); peers outside that set don't see the user as online because there's no surface that would display them. `User.last_seen_at` is updated on each transition so "Last seen 10m ago" works after the user goes offline.
+- **Typing indicator fan-out hits two groups.** The chat consumer broadcasts `chat.typing` into `chat.room.<id>` (for anyone with the room open, including the sender — the frontend filters its own echo) **and** into the other party's `user.<id>` group (so the sidebar can switch the row preview to "typing…" without anyone having to be on the chat page). A 3s client-side idle timer auto-emits `is_typing: false` so a closed tab doesn't leave a stuck indicator.
+
+### 8.15 Sequential per-service quantity
+- **Use case:** services where a customer wants N units in one visit (e.g. 3 cars at a car wash, 2 pets at a groomer) and the shop processes them back-to-back with one staffer.
+- **Sequential model only.** `quantity` multiplies both `duration_minutes` and `price` **linearly**, stays one staff member, one contiguous time block. The service `buffer_minutes` is applied **once** for the whole block, not per unit. No parallel/multi-resource model in v1 — that's a different scheduling problem (would need per-resource capacity).
+- **Inter-unit buffer (per-unit gap).** `Service.inter_unit_buffer_minutes` (PositiveInteger, default 0, owner-editable) is the gap to move/reset between consecutive units of a multi-unit job (e.g. travel between aircon units). The visible appointment duration (what `end_at` reflects) for N units is:
+  - `effective_duration = duration_minutes * N + inter_unit_buffer_minutes * (N - 1)`
+  - N-1 gaps: never after the last unit, never for a single unit. **At N=1 the gap term is 0**, so existing services and *every* single-unit booking are byte-for-byte unchanged even if a non-zero gap is configured (regression-tested).
+  - The end-of-job `buffer_minutes` is **unchanged**: still applied **once**, to the conflict/block window only, never folded into `end_at`. So `end_at = start_at + effective_duration` and `block_end = end_at + buffer_minutes`.
+  - **Price is gap-free:** `total_price = unit_price * N`; the inter-unit gap adds time but no cost (so commission, which derives from `total_price`, is unaffected by the gap).
+- **One formula, one place.** The N-unit duration lives in a single helper `apps/reservations/availability.py::effective_duration_minutes(service, quantity)` and is the sole formula site — reused by `create_customer_reservation`, `create_walk_in`, `reschedule` (services.py) and `compute_slots` / `compute_slots_any` / `_staff_is_free` / `assign_least_loaded_staff` (availability.py, the last two transitively). No inline `duration_minutes * quantity` remains. The helper lives in availability.py because `services.py` already imports from it (avoids a circular import).
+- **Per-service opt-in.** A `Service` only exposes a quantity selector when `max_quantity > 1` (default 1 = feature off). `unit_label` (default `"unit"`) is the noun the frontend shows next to the count. Both are owner-editable via `ServiceSerializer`.
+- **Validation lives in the service layer** (`_validate_quantity`) so all three flows (customer booking, walk-in, reschedule) enforce the same cap; the booking/availability serializers also pre-validate against `max_quantity` for a cleaner 400. Out-of-range → `ValidationError`.
+- **Reschedule preserves the existing quantity** unless a new one is explicitly passed (it does not silently reset to 1); `total_price` is recomputed on quantity change.
+- **Commission is untouched.** It already derives from `total_price`, so scaling the price scales commission automatically — no commission-code change. Walk-ins remain non-commissioned regardless of quantity (see 8.6).
+
+### 8.16 Service price changes — freeze-via-snapshot + audit history
+- **Problem:** a shop owner editing `Service.price` must not retroactively re-price already-booked appointments. If it did, commission (`commission_amount`, written at completion as a % of `total_price`) and revenue reporting would silently drift away from what the customer actually agreed to and was charged.
+- **Decision: snapshot, don't reference.** Each `Reservation` carries its own `unit_price`, frozen at booking time from `Service.price`. `total_price` is *always* derived from the stored `unit_price` (`(unit_price * quantity).quantize("0.01")`), never re-read live from `Service.price`. This is the single invariant enforced in `apps/reservations/services.py::_total_from_unit_price`, used by `create_customer_reservation`, `create_walk_in`, and `reschedule`.
+  - The pre-existing `reschedule()` bug — it re-read `reservation.service.price` and overwrote `total_price` — is fixed: a reschedule (even one that changes quantity) now scales from the **frozen** `unit_price`.
+  - Migration backfills legacy rows: `unit_price = total_price / quantity` (guarding `quantity ≤ 1` → use `total_price` so it never divides by zero and the invariant still holds).
+- **Audit trail:** `ServicePriceHistory` (service FK, old_price, new_price, changed_by, created_at) is appended **only when the persisted price actually changes**. Written in `apps/services/services.py::update_service` inside the same `@transaction.atomic` as the save — **service layer, not a Django signal** (signals hide business logic and fire on every save including no-op updates; the explicit comparison against the DB value is both clearer and avoids spurious rows).
+- **Why not a signal:** matches the project's service-layer rule. The `ServiceViewSet.perform_update` override routes all updates through `update_service`, so there's exactly one code path and one place to reason about price-change side effects.
+- **Visibility:** `GET /api/services/<id>/price-history/` — a shop owner sees history for their **own** services only; admin sees any. Scoping is enforced in the handler (`_can_view_price_history`), with the action's permission relaxed to `IsAuthenticated` so admins aren't blocked by the owner-only default before the owner-vs-admin check runs.
+- **Backward compatible.** All new fields default to 1 / `"unit"`; existing reservations and the existing API contract are unchanged when `quantity` is omitted.
+
+### 8.17 Resource-based scheduling — reserve a station, not a staff member
+- **Problem:** the original engine scheduled per **staff**: a slot was offered if a staff member was free, and booking conflicts were keyed on staff. That breaks for businesses whose bottleneck is a *physical station*, not a person. Carwash is the canonical case: 5 washers but only 2 bays means at most 2 cars at once — staff availability over-counts capacity. Salon (chairs), dental/spa (rooms), restaurants (tables) are the same shape.
+- **Decision: the binding scheduling unit is a `Resource` (a station), and staff is non-binding.** Every service is fulfilled on one Resource for its time range; two bookings can never share a Resource at overlapping times. **The number of active Resources at a shop IS its parallel capacity.** Per-shop `Shop.resource_label` (Bay/Chair/Room/Table/Slot; default "Station") is the cosmetic word the UI uses — it doesn't change behaviour.
+- **Staff = a non-binding request.** `Reservation.staff` stays, but only for attribution ("who served this customer") and to honour an "I'd prefer Juan" preference shown to the shop at confirm time. The conflict engine **never** consults it: the same staff may appear on two overlapping reservations, and that is not a conflict. This is what keeps the engine single-dimension and simple.
+- **v1 scope is strictly 1 Resource : 1 booking.** Deliberately deferred (not built): multiple staff per Resource (crews — the "3 washers on one car" case, which would need a `min(staff/crew_size, bays)` capacity divisor and a reservation↔staff join table), and enforced/guaranteed per-staff calendars (a future per-shop opt-in for salons where the stylist *is* the product). We chose best-effort staff + shop-confirms over that complexity for the 90% case.
+- **Why station-centric over staff-centric:** customers at most of these businesses pick a *time*, not a person; the bay/chair/room is the real constraint. Booking "by station" also dissolves the crew-cardinality and double-booking traps that a staff-bound model keeps hitting.
+- **Concurrency safety:** allocation runs inside the booking `@transaction.atomic` with `select_for_update` over the shop's Resources, so two simultaneous bookers for the last free station are serialised — exactly one wins (`apps/reservations/services.py::_allocate_resource`). Tested under real threads on Postgres (skipped on the SQLite test DB).
+- **Migration / backwards compatibility:** `reservations/0007_backfill_resources` seeds each existing shop with `max(1, active_staff_count)` Resources (so a multi-staff shop keeps its old concurrency, never silently shrinks) and greedily assigns every existing reservation a non-overlapping Resource. New shops get one default Resource on creation. The customer booking page is visually unchanged — staff just became optional ("No preference") and the time grid now reflects station capacity. Availability is computed by `compute_slots_any` (union across Resources); a requested staff no longer narrows it.
 
 ---
 

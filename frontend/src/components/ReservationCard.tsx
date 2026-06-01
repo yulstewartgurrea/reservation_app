@@ -87,11 +87,15 @@ export function ReservationCard({
   actions,
   shopLinkPrefix = "/shops",
   badge,
+  id,
+  className,
 }: {
   reservation: ReservationRow;
   actions: CardAction[];
   shopLinkPrefix?: string;
   badge?: string;
+  id?: string;
+  className?: string;
 }) {
   const [expanded, setExpanded] = useState(false);
 
@@ -123,7 +127,10 @@ export function ReservationCard({
   };
 
   return (
-    <li className="rounded-2xl border border-slate-200 bg-white p-5">
+    <li
+      id={id}
+      className={`rounded-2xl border border-slate-200 bg-white p-5 ${className ?? ""}`}
+    >
       <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
         {/* left: thumbnail + body */}
         <div className="flex min-w-0 flex-1 gap-4">

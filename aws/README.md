@@ -2,6 +2,10 @@
 
 Infrastructure-as-code for deploying the reservation app to AWS. Adapted from the Elated Terraform baseline.
 
+> **Looking for deeper reference?** [DOCUMENTATION.md](DOCUMENTATION.md) covers the architecture,
+> layer-by-layer reference, configuration knobs, secrets-flow, operational runbook, security model,
+> cost breakdown, and troubleshooting. This README is the quick-start.
+
 ## What this provisions (stage / ap-southeast-1)
 
 - **VPC** (`10.244.0.0/20`) across 2 AZs with public, private, and database subnets; single NAT
@@ -11,16 +15,20 @@ Infrastructure-as-code for deploying the reservation app to AWS. Adapted from th
   - `svc-ecs-reservation-stage-api` — Daphne ASGI on port 8000, internal ALB, health `/health/`
   - `svc-ecs-reservation-stage-celery-worker` — Celery worker (concurrency 4)
   - `svc-ecs-reservation-stage-celery-beat` — Celery beat scheduler
-- **RDS PostgreSQL 16.4** — `db.t4g.micro`, single-AZ, encrypted at rest, db `reservation`
+- **RDS PostgreSQL 17.4** — `db.t4g.micro`, single-AZ, encrypted at rest, db `reservation`
 - **ElastiCache Redis 7.1** — `cache.t3.micro`, TLS, used by Channels and Celery
+- **SES** — verified sender identity + SMTP IAM user; credentials piped into SSM at
+  `/reservation/stage/ses/*` and read by the ECS task as `EMAIL_*`
 - **SSM Parameter Store** — DB/Redis connection params + app config from `parameters/env.yaml`
 - **S3** — private bucket for media uploads
 - **Internal ALB** — fronts the API; reachable from inside the VPC
 
 **Region:** `ap-southeast-1` (Singapore — lowest-latency AWS region to Philippines).
 
-**Not included in this initial stage deploy:** CloudFront, Route 53, ACM certificates, SES, and
-the websocket public ALB. These all need a registered domain — see "Adding a domain later" below.
+**Not included in this initial stage deploy:** CloudFront, Route 53, ACM certificates, and the
+websocket public ALB. These all need a registered domain — see "Adding a domain later" below.
+SES is provisioned in **email-only** mode (single verified address); upgrade to domain
+verification once you have a hosted zone.
 
 ## Layout
 
@@ -44,7 +52,7 @@ aws/
 │           ├── ecs/terragrunt.hcl
 │           └── storage/terragrunt.hcl
 └── layers/
-    ├── networking/  ecr/  parameters/  rds/  redis/  ecs/  storage/
+    ├── networking/  ecr/  parameters/  rds/  redis/  ecs/  ses/  storage/
 ```
 
 ## Prerequisites
@@ -114,6 +122,12 @@ graph). To target one layer, `cd` into it (e.g. `cd networking/`) and run `terra
 
 ## Deploying app code
 
+> Most of the time you don't run these by hand. After the one-time setup, the GitHub Actions
+> workflow at [.github/workflows/backend-deploy.yml](../.github/workflows/backend-deploy.yml) does
+> all of this on every push to `staging` or `main`. See [DOCUMENTATION.md § 13 "CI/CD with GitHub Actions"](DOCUMENTATION.md#13-cicd-with-github-actions)
+> for setup + rollback. The manual steps below are for the very first deploy (before CI exists)
+> or emergencies.
+
 1. Authenticate Docker against the new ECR repo:
    ```bash
    aws ecr get-login-password --region ap-southeast-1 --profile reservation-stage \
@@ -137,6 +151,138 @@ graph). To target one layer, `cd` into it (e.g. `cd networking/`) and run `terra
    ```
 
 The ECS task definition references `:latest`, so `--force-new-deployment` is the redeploy trigger.
+
+## SES (transactional email) setup
+
+The `ses` layer provisions a verified sender identity, an IAM user with `ses:SendRawEmail`,
+an access key, and writes the resulting SMTP credentials into SSM under
+`/reservation/<env>/ses/*`. The ECS task definition reads them from there as `EMAIL_*`.
+
+### First-time apply
+
+1. **Pick a sender.** Edit `accounts/stage/ap-southeast-1/region.hcl` and set
+   `verified_email` to whatever inbox you control (Gmail is fine for testing). Optionally
+   add test recipients in `additional_verified_emails` — required while the account is in
+   SES sandbox, because sandbox can only send TO verified addresses.
+2. **Apply the layer:**
+   ```bash
+   cd aws/accounts/stage/ap-southeast-1/ses
+   terragrunt apply
+   ```
+   Terraform creates the SES email identity. AWS emails you a verification link — **click it**
+   before sending any test mail, or send attempts will fail with `MessageRejected`.
+3. **Re-apply ECS** so the task definition picks up the new SSM secret paths:
+   ```bash
+   cd ../ecs
+   terragrunt apply
+   ```
+   Then force a new deployment:
+   ```bash
+   aws ecs update-service \
+     --cluster ecs-reservation-stage \
+     --service svc-ecs-reservation-stage-api \
+     --force-new-deployment \
+     --region ap-southeast-1 --profile reservation-stage
+   ```
+4. **Smoke test.** Hit the API's signup endpoint (or trigger any flow that calls
+   `send_template_email`); the recipient should receive the message within seconds.
+   Check CloudWatch logs of the `api` service if it doesn't land.
+
+### Going to production
+
+By default SES accounts are in **sandbox**: max 200 messages/day, only verified recipients.
+To leave sandbox, in the SES console click **Account dashboard → Request production access**
+(use the description: *"Transactional email for a reservation platform — signup OTPs, password
+reset links, booking confirmations; single-opt-in only, no marketing."*). Approval is usually
+under 24 hours.
+
+When you add a domain (post-Route53):
+- Add an `aws_ses_domain_identity` + `aws_ses_domain_dkim` to `layers/ses/main.tf`
+- Add the three DKIM CNAME records to your hosted zone
+- Switch `verified_email` over to an address on the verified domain (e.g. `noreply@yourdomain.com`)
+- Remove `additional_verified_emails` (no longer needed once out of sandbox)
+
+### Rotating SMTP credentials
+
+`terraform taint` the access key and re-apply:
+```bash
+cd aws/accounts/stage/ap-southeast-1/ses
+terragrunt apply -replace='aws_iam_access_key.smtp'
+cd ../ecs && terragrunt apply   # picks up the new password from SSM
+```
+
+## Connecting to staging Postgres from your laptop
+
+Stage RDS can be exposed on a public endpoint for local DB tooling (psql, TablePlus,
+local Django). It stays gated by the security group — only the VPC and the IPs you
+allowlist get through. **This is a non-prod convenience; never do this for prod.**
+
+### One-time setup
+
+1. **Find your public IP:**
+   ```bash
+   curl -s https://checkip.amazonaws.com
+   ```
+2. **Allowlist it.** Edit [accounts/stage/ap-southeast-1/region.hcl](accounts/stage/ap-southeast-1/region.hcl):
+   ```hcl
+   create_database_internet_gateway_route = true        # in the VPC block
+   rds_publicly_accessible                 = true        # in the RDS block
+   db_allowed_cidrs                        = ["203.0.113.7/32"]  # ← your IP from step 1
+   ```
+   Keep it a tight `/32`. Never `0.0.0.0/0`.
+3. **Apply networking first, then rds — order matters:**
+   ```bash
+   cd aws/accounts/stage/ap-southeast-1/networking
+   terragrunt apply        # adds the 0.0.0.0/0 → IGW route to the database route table
+   cd ../rds
+   terragrunt apply        # sets publicly_accessible = true on the instance
+   ```
+   **Why two layers, in this order:** AWS rejects moving an existing RDS instance to a
+   different subnet group in the same VPC (`InvalidVPCNetworkStateFault`). So the DB
+   stays in its original database subnet group; public reachability comes from adding an
+   internet-gateway route to that route table (the networking layer) plus
+   `publicly_accessible = true` (the rds layer). If you run `rds` before `networking`,
+   the endpoint gets a public IP but it isn't routable yet — connections will hang until
+   `networking` is applied.
+
+   ⚠️ Review the rds plan. Toggling `publicly_accessible` is an **in-place modify with a
+   brief connection blip**, not a replacement — confirm the plan says `~ update`, not
+   `-/+ replace`, before approving. Stage has `skip_final_snapshot = true` and no
+   deletion protection, so a surprise replace would lose data.
+
+### Connect
+
+Pull the credentials from SSM (the rds layer wrote them there):
+
+```bash
+PROFILE=reservation-stage; REGION=ap-southeast-1
+HOST=$(aws ssm get-parameter --name /reservation/stage/rds_host --query 'Parameter.Value' --output text --region $REGION --profile $PROFILE)
+USER=$(aws ssm get-parameter --name /reservation/stage/rds_username --query 'Parameter.Value' --output text --region $REGION --profile $PROFILE)
+PASS=$(aws ssm get-parameter --name /reservation/stage/rds_password --with-decryption --query 'Parameter.Value' --output text --region $REGION --profile $PROFILE)
+DB=$(aws ssm get-parameter --name /reservation/stage/rds_db_name --query 'Parameter.Value' --output text --region $REGION --profile $PROFILE)
+
+PGPASSWORD="$PASS" psql "host=$HOST port=5432 dbname=$DB user=$USER sslmode=require"
+```
+
+`sslmode=require` is mandatory — RDS rejects plaintext. For local Django, use the
+prebuilt connection URL (already SSL-required):
+
+```bash
+aws ssm get-parameter --name /reservation/stage/rds_connection_url --with-decryption \
+  --query 'Parameter.Value' --output text --region $REGION --profile $PROFILE
+```
+
+### When your IP changes
+
+Home/office IPs rotate. When you can't connect, re-check `curl -s https://checkip.amazonaws.com`,
+update `db_allowed_cidrs`, and re-apply the rds layer (SG-only change, ~10s, no DB restart).
+
+### Locking it back down
+
+Set `rds_publicly_accessible = false` and empty `db_allowed_cidrs`, `terragrunt apply`
+the **rds** layer first (drops the public IP while the IGW route still exists), then set
+`create_database_internet_gateway_route = false` and `terragrunt apply` the **networking**
+layer. Reverse order of the setup — the DB returns to fully private.
 
 ## Hitting the API
 

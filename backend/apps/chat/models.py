@@ -31,13 +31,25 @@ class ChatRoom(models.Model):
 
 
 class Message(models.Model):
+    class AttachmentKind(models.TextChoices):
+        IMAGE = "image", "Image"
+        VIDEO = "video", "Video"
+        FILE = "file", "File"
+
     room = models.ForeignKey(ChatRoom, on_delete=models.CASCADE, related_name="messages")
     sender = models.ForeignKey(
         settings.AUTH_USER_MODEL,
         on_delete=models.CASCADE,
         related_name="chat_messages",
     )
-    body = models.TextField()
+    body = models.TextField(blank=True)
+    attachment = models.FileField(upload_to="chat/%Y/%m/", null=True, blank=True)
+    attachment_kind = models.CharField(
+        max_length=8, choices=AttachmentKind.choices, blank=True
+    )
+    attachment_name = models.CharField(max_length=255, blank=True)
+    attachment_size = models.PositiveIntegerField(null=True, blank=True)
+    attachment_mime = models.CharField(max_length=128, blank=True)
     edited_at = models.DateTimeField(null=True, blank=True)
     is_deleted = models.BooleanField(default=False)
     created_at = models.DateTimeField(auto_now_add=True)
