@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
+import { MapPin, Search, Star } from "lucide-react";
+import { api } from "@/lib/api";
 
 /**
  * Root route.
@@ -23,78 +25,99 @@ import { useRouter } from "next/navigation";
  * before hydration and clobbers fallback resolution before
  * the client router can look at the URL.
  */
-const categories = [
-  { name: "Hair salons", icon: "💇" },
-  { name: "Nail studios", icon: "💅" },
-  { name: "Massage", icon: "💆" },
-  { name: "Spa", icon: "🧖" },
-  { name: "Barbers", icon: "✂️" },
-  { name: "Car wash", icon: "🚗" },
-  { name: "Repair", icon: "🛠️" },
-  { name: "Dental", icon: "🦷" },
-];
 
-const featuredDestinations = [
-  {
-    title: "BGC, Taguig",
-    subtitle: "Premium wellness and beauty spots",
-    image:
-      "https://images.unsplash.com/photo-1582719478250-c89cae4dc85b?auto=format&fit=crop&w=1200&q=80",
-  },
-  {
-    title: "Makati",
-    subtitle: "Fast bookings around business districts",
-    image:
-      "https://images.unsplash.com/photo-1523275335684-37898b6baf30?auto=format&fit=crop&w=1200&q=80",
-  },
-  {
-    title: "Quezon City",
-    subtitle: "Budget-friendly service picks",
-    image:
-      "https://images.unsplash.com/photo-1522337360788-8b13dee7a37e?auto=format&fit=crop&w=1200&q=80",
-  },
-  {
-    title: "Cebu City",
-    subtitle: "Top-rated shops near you",
-    image:
-      "https://images.unsplash.com/photo-1487412720507-e7ab37603c6f?auto=format&fit=crop&w=1200&q=80",
-  },
-];
+// Beta scope: Iligan City only. We display the friendly label
+// ("Iligan City") but pass the canonical PSGC name ("City of Iligan",
+// from `apps/locations`) to every API filter and `/shops` link so the
+// match hits the value actually stored on Shop.city.
+const BETA_CITY_LABEL = "Iligan City";
+const BETA_CITY_NAME = "City of Iligan";
 
-const featuredStays = [
-  {
-    title: "Glow Lounge",
-    location: "Makati",
-    distance: "5 km away",
-    price: "from PHP 850",
-    image:
-      "https://images.unsplash.com/photo-1560066984-138dadb4c035?auto=format&fit=crop&w=1200&q=80",
-  },
-  {
-    title: "The Daily Barber",
-    location: "BGC",
-    distance: "3 km away",
-    price: "from PHP 420",
-    image:
-      "https://images.unsplash.com/photo-1621605815971-fbc98d665033?auto=format&fit=crop&w=1200&q=80",
-  },
-  {
-    title: "Serenity Spa",
-    location: "Quezon City",
-    distance: "8 km away",
-    price: "from PHP 1,100",
-    image:
-      "https://images.unsplash.com/photo-1544161515-4ab6ce6db874?auto=format&fit=crop&w=1200&q=80",
-  },
-  {
-    title: "QuickFix Auto Care",
-    location: "Pasig",
-    distance: "7 km away",
-    price: "from PHP 650",
-    image:
-      "https://images.unsplash.com/photo-1607860108855-64acf2078ed9?auto=format&fit=crop&w=1200&q=80",
-  },
-];
+type Category = { id: number; name: string; slug: string };
+
+type ShopHit = {
+  id: number;
+  name: string;
+  city: string;
+  cover_photo?: string | null;
+  avg_rating?: number | null;
+  reviews_count?: number;
+  services_count?: number;
+  categories?: { id: number; name: string }[];
+};
+
+type ServiceHit = {
+  id: number;
+  name: string;
+  duration_minutes: number;
+  price: string;
+  cover_photo?: string | null;
+  shop_id: number;
+  shop_name: string;
+  shop_city: string;
+  category?: string | null;
+  shop_avg_rating?: number | null;
+  shop_reviews_count?: number;
+};
+
+type Paginated<T> = {
+  count: number;
+  next: string | null;
+  previous: string | null;
+  results: T[];
+};
+
+// Slug → emoji. Anything not in the map falls back to a generic tag icon.
+const CATEGORY_ICONS: Record<string, string> = {
+  "hair-beauty": "💇",
+  "wellness": "🧖",
+  "home-services": "🏠",
+  "automotive": "🚗",
+  "fitness-training": "🏋️",
+  "pet-services": "🐾",
+  "tech-repair": "🛠️",
+};
+
+function iconForCategory(slug: string): string {
+  return CATEGORY_ICONS[slug] ?? "🏷️";
+}
+
+// Today (YYYY-MM-DD in local time) — guards the date picker so customers
+// cannot ask for shops "available yesterday".
+function todayIso() {
+  const now = new Date();
+  const offset = now.getTimezoneOffset();
+  const local = new Date(now.getTime() - offset * 60 * 1000);
+  return local.toISOString().slice(0, 10);
+}
+
+function buildShopsHref(params: {
+  city?: string;
+  q?: string;
+  bookingDate?: string;
+  categories?: string;
+}) {
+  const sp = new URLSearchParams();
+  if (params.city) sp.set("city", params.city);
+  if (params.q && params.q.trim()) sp.set("q", params.q.trim());
+  if (params.bookingDate) sp.set("booking_date", params.bookingDate);
+  if (params.categories) sp.set("categories", params.categories);
+  const qs = sp.toString();
+  return qs ? `/shops?${qs}` : "/shops";
+}
+
+function buildServicesHref(params: {
+  city?: string;
+  bookingDate?: string;
+  category?: string;
+}) {
+  const sp = new URLSearchParams();
+  if (params.city) sp.set("city", params.city);
+  if (params.bookingDate) sp.set("booking_date", params.bookingDate);
+  if (params.category) sp.set("category", params.category);
+  const qs = sp.toString();
+  return qs ? `/services?${qs}` : "/services";
+}
 
 export default function HomePage() {
   const router = useRouter();
@@ -106,122 +129,380 @@ export default function HomePage() {
     }
   }, [router]);
 
+  const [serviceQuery, setServiceQuery] = useState("");
+  const [bookingDate, setBookingDate] = useState("");
+
+  const serviceInputRef = useRef<HTMLInputElement>(null);
+  const dateInputRef = useRef<HTMLInputElement>(null);
+  const heroSearchRef = useRef<HTMLFormElement>(null);
+
+  // Live data — categories, top Iligan shops, top Iligan services.
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [categoriesLoading, setCategoriesLoading] = useState(true);
+  const [topShops, setTopShops] = useState<ShopHit[]>([]);
+  const [topShopsLoading, setTopShopsLoading] = useState(true);
+  const [topServices, setTopServices] = useState<ServiceHit[]>([]);
+  const [topServicesLoading, setTopServicesLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    api
+      .get("/shops/categories/")
+      .then((r) => {
+        if (cancelled) return;
+        const raw = (r.data?.results ?? r.data ?? []) as Category[];
+        setCategories(raw);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setCategoriesLoading(false);
+      });
+
+    // Filter by the PSGC master name (`City of Iligan`) so the value matches
+    // what shops actually have in their `city` column.
+    api
+      .get<Paginated<ShopHit>>("/shops/", {
+        params: {
+          city: BETA_CITY_NAME,
+          ordering: "-avg_rating",
+          page_size: 4,
+        },
+      })
+      .then((r) => {
+        if (!cancelled) setTopShops(r.data?.results ?? []);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setTopShopsLoading(false);
+      });
+
+    api
+      .get<Paginated<ServiceHit>>("/services/discover/", {
+        params: {
+          city: BETA_CITY_NAME,
+          ordering: "-shop_avg_rating",
+          page_size: 4,
+        },
+      })
+      .then((r) => {
+        if (!cancelled) setTopServices(r.data?.results ?? []);
+      })
+      .catch(() => undefined)
+      .finally(() => {
+        if (!cancelled) setTopServicesLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const targetHref = useMemo(
+    () => buildShopsHref({ city: BETA_CITY_NAME, q: serviceQuery, bookingDate }),
+    [serviceQuery, bookingDate]
+  );
+
+  function handleHeroSubmit(e: React.FormEvent) {
+    e.preventDefault();
+    router.push(targetHref);
+  }
+
+  function focusHeroField(field: "service" | "date") {
+    heroSearchRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    setTimeout(() => {
+      if (field === "service") serviceInputRef.current?.focus();
+      else dateInputRef.current?.focus();
+    }, 250);
+  }
+
+  const minDate = todayIso();
+
   return (
     <div className="space-y-10 pb-12">
+      {/* STICKY TOP BAR — mirrors hero state, clicking submits the same search. */}
       <section className="sticky top-3 z-20 rounded-full border border-slate-200 bg-white/95 px-3 py-2 shadow-sm backdrop-blur">
         <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 items-center gap-2 rounded-full border border-slate-200 px-4 py-2 shadow-sm">
-            <span className="text-sm font-semibold text-slate-800">Anywhere</span>
-            <span className="h-4 w-px bg-slate-200" />
-            <span className="text-sm font-semibold text-slate-800">Any service</span>
-            <span className="h-4 w-px bg-slate-200" />
-            <span className="text-sm text-slate-500">Add date</span>
+          <div className="flex min-w-0 flex-1 items-center gap-2 rounded-full border border-slate-200 px-2 py-1 shadow-sm">
+            <span
+              className="inline-flex min-w-0 items-center gap-1 truncate rounded-full px-3 py-1.5 text-sm font-semibold text-slate-800"
+              title="Beta scope — Iligan City only"
+            >
+              <MapPin size={12} className="shrink-0 text-brand-600" />
+              {BETA_CITY_LABEL}
+            </span>
+            <span className="h-4 w-px shrink-0 bg-slate-200" />
+            <button
+              type="button"
+              onClick={() => focusHeroField("service")}
+              className="min-w-0 truncate rounded-full px-3 py-1.5 text-sm font-semibold text-slate-800 hover:bg-slate-50"
+            >
+              {serviceQuery || "Any service"}
+            </button>
+            <span className="h-4 w-px shrink-0 bg-slate-200" />
+            <button
+              type="button"
+              onClick={() => focusHeroField("date")}
+              className={`min-w-0 truncate rounded-full px-3 py-1.5 text-sm hover:bg-slate-50 ${
+                bookingDate ? "font-semibold text-slate-800" : "text-slate-500"
+              }`}
+            >
+              {bookingDate || "Add date"}
+            </button>
           </div>
           <Link
-            href="/shops"
-            className="inline-flex h-10 w-10 items-center justify-center rounded-full bg-brand-600 text-lg text-white transition hover:bg-brand-700"
+            href={targetHref}
+            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-brand-600 text-white transition hover:bg-brand-700"
             aria-label="Search shops"
           >
-            🔍
+            <Search size={18} />
           </Link>
         </div>
       </section>
 
+      {/* HERO — primary search form. */}
       <section className="overflow-hidden rounded-3xl bg-gradient-to-r from-brand-700 via-brand-600 to-brand-500 px-6 py-12 text-white sm:px-10 sm:py-16">
         <p className="text-xs font-semibold uppercase tracking-[0.25em] text-brand-100">BookMe</p>
         <h1 className="mt-4 max-w-3xl text-3xl font-semibold leading-tight sm:text-5xl">
-          Book services with an Airbnb-style experience.
+          Book local services in seconds.
         </h1>
         <p className="mt-4 max-w-2xl text-base text-brand-50 sm:text-lg">
-          Browse nearby salons, spas, clinics, and auto shops with fast booking and clear pricing.
+          Find salons, spas, clinics, and auto shops in Iligan — real-time availability, clear pricing, no phone calls.
         </p>
-        <div className="mt-8 grid gap-3 rounded-2xl bg-white p-3 text-slate-900 shadow-2xl sm:grid-cols-[1.3fr_1fr_1fr_auto]">
-          <button type="button" className="rounded-xl px-4 py-3 text-left transition hover:bg-slate-50">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Where</p>
-            <p className="mt-1 text-sm font-medium">Metro Manila</p>
-          </button>
-          <button type="button" className="rounded-xl px-4 py-3 text-left transition hover:bg-slate-50">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Service</p>
-            <p className="mt-1 text-sm font-medium">Haircut, massage...</p>
-          </button>
-          <button type="button" className="rounded-xl px-4 py-3 text-left transition hover:bg-slate-50">
-            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">When</p>
-            <p className="mt-1 text-sm font-medium">Add date</p>
-          </button>
-          <Link
-            href="/shops"
-            className="inline-flex items-center justify-center rounded-xl bg-brand-600 px-6 py-3 text-sm font-semibold text-white transition hover:bg-brand-700"
+
+        <form
+          ref={heroSearchRef}
+          onSubmit={handleHeroSubmit}
+          className="mt-8 grid gap-3 rounded-2xl bg-white p-3 text-slate-900 shadow-2xl sm:grid-cols-[1.3fr_1fr_1fr_auto]"
+        >
+          <div className="rounded-xl px-4 py-3">
+            <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Where
+            </p>
+            <p className="mt-1 inline-flex items-center gap-1.5 text-sm font-medium text-slate-900">
+              <MapPin size={14} className="text-brand-600" />
+              {BETA_CITY_LABEL}
+              <span className="ml-1 rounded-full bg-brand-50 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-brand-700">
+                Beta
+              </span>
+            </p>
+          </div>
+
+          <label className="block rounded-xl px-4 py-3 transition hover:bg-slate-50">
+            <span className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+              Service
+            </span>
+            <input
+              ref={serviceInputRef}
+              value={serviceQuery}
+              onChange={(e) => setServiceQuery(e.target.value)}
+              type="text"
+              placeholder="Haircut, massage..."
+              aria-label="Service"
+              className="mt-1 w-full bg-transparent text-sm font-medium text-slate-900 placeholder:text-slate-400 focus:outline-none"
+            />
+          </label>
+
+          <label className="block rounded-xl px-4 py-3 transition hover:bg-slate-50">
+            <span className="block text-xs font-semibold uppercase tracking-wide text-slate-500">
+              When
+            </span>
+            <input
+              ref={dateInputRef}
+              type="date"
+              value={bookingDate}
+              min={minDate}
+              onChange={(e) => setBookingDate(e.target.value)}
+              aria-label="Booking date"
+              className={`mt-1 w-full bg-transparent text-sm font-medium focus:outline-none ${
+                bookingDate ? "text-slate-900" : "text-slate-400"
+              }`}
+            />
+          </label>
+
+          <button
+            type="submit"
+            className="inline-flex items-center justify-center gap-2 rounded-xl bg-brand-600 px-6 py-3 text-sm font-semibold text-white transition hover:bg-brand-700"
           >
+            <Search size={16} />
             Search
-          </Link>
-        </div>
+          </button>
+        </form>
       </section>
 
+      {/* POPULAR CATEGORIES — real categories from /shops/categories/. */}
       <section className="space-y-4">
         <div className="flex items-center justify-between">
           <h2 className="text-xl font-semibold text-slate-900">Popular categories</h2>
-          <Link href="/services" className="text-sm font-semibold text-slate-600 hover:text-slate-900">
+          <Link
+            href={buildShopsHref({ city: BETA_CITY_NAME })}
+            className="text-sm font-semibold text-slate-600 hover:text-slate-900"
+          >
             Show all
           </Link>
         </div>
-        <div className="-mx-2 flex gap-3 overflow-x-auto px-2 pb-1">
-          {categories.map((category) => (
-            <button
-              key={category.name}
-              type="button"
-              className="inline-flex shrink-0 items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:shadow-sm"
-            >
-              <span>{category.icon}</span>
-              <span>{category.name}</span>
-            </button>
-          ))}
-        </div>
+        {categoriesLoading ? (
+          <div className="-mx-2 flex gap-3 overflow-x-auto px-2 pb-1">
+            {Array.from({ length: 6 }).map((_, i) => (
+              <div
+                key={i}
+                className="h-10 w-32 shrink-0 animate-pulse rounded-full bg-slate-100"
+                aria-hidden="true"
+              />
+            ))}
+          </div>
+        ) : categories.length === 0 ? (
+          <p className="text-sm text-slate-500">No categories yet.</p>
+        ) : (
+          <div className="-mx-2 flex gap-3 overflow-x-auto px-2 pb-1">
+            {categories.map((c) => (
+              <Link
+                key={c.id}
+                href={buildShopsHref({
+                  city: BETA_CITY_NAME,
+                  categories: String(c.id),
+                  bookingDate,
+                })}
+                className="inline-flex shrink-0 items-center gap-2 rounded-full border border-slate-200 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:border-slate-300 hover:shadow-sm"
+              >
+                <span>{iconForCategory(c.slug)}</span>
+                <span>{c.name}</span>
+              </Link>
+            ))}
+          </div>
+        )}
       </section>
 
+      {/* TOP SHOPS — all active shops, highest rated first. */}
       <section className="space-y-4">
         <div className="flex items-center justify-between">
-          <h2 className="text-xl font-semibold text-slate-900">Inspiration for your next booking</h2>
-          <Link href="/shops" className="text-sm font-semibold text-brand-600 hover:text-brand-700">
+          <h2 className="text-xl font-semibold text-slate-900">Top shops</h2>
+          <Link
+            href={buildShopsHref({ city: BETA_CITY_NAME })}
+            className="text-sm font-semibold text-brand-600 hover:text-brand-700"
+          >
             Explore all
           </Link>
         </div>
-        <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
-          {featuredDestinations.map((item) => (
-            <article
-              key={item.title}
-              className="overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-200 transition hover:-translate-y-0.5 hover:shadow-md"
-            >
-              <img src={item.image} alt={item.title} className="h-44 w-full object-cover" loading="lazy" />
-              <div className="space-y-1 p-4">
-                <h3 className="text-base font-semibold text-slate-900">{item.title}</h3>
-                <p className="text-sm text-slate-600">{item.subtitle}</p>
-              </div>
-            </article>
-          ))}
-        </div>
+        {topShopsLoading ? (
+          <ShopGridSkeleton />
+        ) : topShops.length === 0 ? (
+          <EmptySectionState
+            message="No active shops yet."
+            ctaLabel="List your shop"
+            ctaHref="/register"
+          />
+        ) : (
+          <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+            {topShops.map((shop) => (
+              <Link
+                key={shop.id}
+                href={`/shops/${shop.id}`}
+                className="block overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-200 transition hover:-translate-y-0.5 hover:shadow-md"
+              >
+                {shop.cover_photo ? (
+                  <img
+                    src={shop.cover_photo}
+                    alt={shop.name}
+                    className="h-44 w-full object-cover"
+                    loading="lazy"
+                  />
+                ) : (
+                  <div className="flex h-44 w-full items-center justify-center bg-gradient-to-br from-brand-100 to-brand-50 text-3xl">
+                    🏪
+                  </div>
+                )}
+                <div className="space-y-1 p-4">
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className="text-base font-semibold text-slate-900">
+                      {shop.name}
+                    </h3>
+                    {typeof shop.avg_rating === "number" && (
+                      <span className="inline-flex shrink-0 items-center gap-1 text-sm text-slate-700">
+                        <Star size={14} className="fill-amber-400 text-amber-400" />
+                        {shop.avg_rating.toFixed(1)}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-sm text-slate-500">{shop.city}</p>
+                  {shop.categories && shop.categories.length > 0 && (
+                    <p className="truncate text-xs text-slate-400">
+                      {shop.categories.map((c) => c.name).join(" · ")}
+                    </p>
+                  )}
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
       </section>
 
+      {/* AVAILABLE SERVICES — all active services, highest-rated shop first. */}
       <section className="space-y-4">
-        <h2 className="text-xl font-semibold text-slate-900">Available this week</h2>
-        <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
-          {featuredStays.map((item) => (
-            <article key={item.title} className="space-y-3">
-              <div className="overflow-hidden rounded-2xl">
-                <img src={item.image} alt={item.title} className="h-56 w-full object-cover transition hover:scale-105" loading="lazy" />
-              </div>
-              <div className="space-y-1">
-                <div className="flex items-start justify-between gap-2">
-                  <h3 className="text-sm font-semibold text-slate-900">{item.title}</h3>
-                  <span className="text-sm text-slate-700">★ 4.9</span>
-                </div>
-                <p className="text-sm text-slate-500">
-                  {item.location} · {item.distance}
-                </p>
-                <p className="text-sm font-semibold text-slate-900">{item.price}</p>
-              </div>
-            </article>
-          ))}
+        <div className="flex items-center justify-between">
+          <h2 className="text-xl font-semibold text-slate-900">
+            Available services
+          </h2>
+          <Link
+            href={buildServicesHref({ city: BETA_CITY_NAME, bookingDate })}
+            className="text-sm font-semibold text-brand-600 hover:text-brand-700"
+          >
+            Browse all services
+          </Link>
         </div>
+        {topServicesLoading ? (
+          <ServiceGridSkeleton />
+        ) : topServices.length === 0 ? (
+          <EmptySectionState
+            message="No services available yet."
+            ctaLabel="List your shop"
+            ctaHref="/register"
+          />
+        ) : (
+          <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+            {topServices.map((service) => (
+              <Link
+                key={service.id}
+                href={`/shops/${service.shop_id}/book?service=${service.id}`}
+                className="block space-y-3"
+              >
+                <div className="overflow-hidden rounded-2xl bg-slate-100">
+                  {service.cover_photo ? (
+                    <img
+                      src={service.cover_photo}
+                      alt={service.name}
+                      className="h-56 w-full object-cover transition hover:scale-105"
+                      loading="lazy"
+                    />
+                  ) : (
+                    <div className="flex h-56 w-full items-center justify-center bg-gradient-to-br from-brand-100 to-brand-50 text-4xl">
+                      ✨
+                    </div>
+                  )}
+                </div>
+                <div className="space-y-1">
+                  <div className="flex items-start justify-between gap-2">
+                    <h3 className="text-sm font-semibold text-slate-900">
+                      {service.name}
+                    </h3>
+                    {typeof service.shop_avg_rating === "number" && (
+                      <span className="inline-flex shrink-0 items-center gap-1 text-sm text-slate-700">
+                        <Star size={14} className="fill-amber-400 text-amber-400" />
+                        {service.shop_avg_rating.toFixed(1)}
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-sm text-slate-500">
+                    {service.shop_name} · {service.duration_minutes} min
+                  </p>
+                  <p className="text-sm font-semibold text-slate-900">
+                    PHP {service.price}
+                  </p>
+                </div>
+              </Link>
+            ))}
+          </div>
+        )}
       </section>
 
       <section className="rounded-3xl bg-slate-900 px-6 py-8 text-white sm:px-10">
@@ -236,6 +517,66 @@ export default function HomePage() {
           Get started
         </Link>
       </section>
+    </div>
+  );
+}
+
+function ShopGridSkeleton() {
+  return (
+    <div className="grid gap-5 sm:grid-cols-2 lg:grid-cols-4">
+      {Array.from({ length: 4 }).map((_, i) => (
+        <div
+          key={i}
+          className="overflow-hidden rounded-2xl bg-white shadow-sm ring-1 ring-slate-200"
+          aria-hidden="true"
+        >
+          <div className="h-44 w-full animate-pulse bg-slate-100" />
+          <div className="space-y-2 p-4">
+            <div className="h-4 w-3/4 animate-pulse rounded bg-slate-100" />
+            <div className="h-3 w-1/2 animate-pulse rounded bg-slate-100" />
+            <div className="h-3 w-2/5 animate-pulse rounded bg-slate-100" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ServiceGridSkeleton() {
+  return (
+    <div className="grid gap-6 sm:grid-cols-2 lg:grid-cols-4">
+      {Array.from({ length: 4 }).map((_, i) => (
+        <div key={i} className="space-y-3" aria-hidden="true">
+          <div className="h-56 w-full animate-pulse rounded-2xl bg-slate-100" />
+          <div className="space-y-2">
+            <div className="h-4 w-3/4 animate-pulse rounded bg-slate-100" />
+            <div className="h-3 w-1/2 animate-pulse rounded bg-slate-100" />
+            <div className="h-3 w-1/3 animate-pulse rounded bg-slate-100" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function EmptySectionState({
+  message,
+  ctaLabel,
+  ctaHref,
+}: {
+  message: string;
+  ctaLabel: string;
+  ctaHref: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-dashed border-slate-200 bg-white p-10 text-center">
+      <p className="text-sm font-medium text-slate-700">{message}</p>
+      <Link
+        href={ctaHref}
+        className="mt-2 inline-block text-sm font-medium text-brand-600 hover:text-brand-700"
+      >
+        {ctaLabel}
+      </Link>
     </div>
   );
 }
