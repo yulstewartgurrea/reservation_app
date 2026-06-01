@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import {
   CalendarDays,
   Heart,
+  LifeBuoy,
   LogOut,
   MessageSquare,
   Pencil,
@@ -87,6 +88,15 @@ export function ProfileSidebar({
           active={isActive("/profile/favorites")}
         />
         <NavItem href="/chat" icon={MessageSquare} label="Messages" active={false} />
+      </Section>
+
+      <Section title="Help">
+        <NavItem
+          href="/support"
+          icon={LifeBuoy}
+          label="Support"
+          active={isActive("/support")}
+        />
       </Section>
 
       <div className="mt-6">

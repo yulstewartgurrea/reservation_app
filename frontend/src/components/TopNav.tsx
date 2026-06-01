@@ -4,9 +4,11 @@ import Link from "next/link";
 import Image from "next/image";
 import { useEffect } from "react";
 import { useAuth } from "@/lib/auth";
+import { AdminTicketsNavLink } from "./AdminTicketsNavLink";
 import { Avatar } from "./Avatar";
 import { ChatBadge } from "./ChatBadge";
 import { NotificationBell } from "./NotificationBell";
+import { SupportNavLink } from "./SupportNavLink";
 
 export function TopNav() {
   const { user, fetchMe, logout } = useAuth();
@@ -58,6 +60,10 @@ export function TopNav() {
                   Admin
                 </Link>
               )}
+              {(user.role === "customer" || user.role === "shop_owner") && (
+                <SupportNavLink />
+              )}
+              {user.role === "admin" && <AdminTicketsNavLink />}
               <ChatBadge />
               <NotificationBell />
               {user.role === "customer" && (

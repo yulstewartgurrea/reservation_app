@@ -47,6 +47,7 @@ INSTALLED_APPS = [
     "apps.chat",
     "apps.core",
     "apps.locations",
+    "apps.support",
 ]
 
 MIDDLEWARE = [
@@ -173,6 +174,8 @@ REST_FRAMEWORK = {
         "login": "5/min",
         "register": "5/hour",
         "password_reset": "5/hour",
+        "support_ticket_create": "10/hour",
+        "support_message_create": "30/hour",
     },
     # How many trusted proxies sit in front of the app. Required for IP-based
     # throttling to use the real client IP from X-Forwarded-For rather than the

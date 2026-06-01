@@ -58,6 +58,12 @@ export default function AdminHomePage() {
           >
             Commission ledger
           </Link>
+          <Link
+            href="/admin/tickets"
+            className="rounded-md border border-slate-300 px-3 py-2 text-sm hover:bg-slate-50"
+          >
+            Support tickets
+          </Link>
         </div>
       </div>
 

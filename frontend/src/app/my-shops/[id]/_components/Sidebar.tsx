@@ -23,6 +23,7 @@ import {
   Clock,
   Grid3x3,
   Image as ImageIcon,
+  LifeBuoy,
   PauseCircle,
   Pencil,
   PlayCircle,
@@ -150,6 +151,17 @@ export function Sidebar({
           label="Reservations"
           active={isActive(`${base}/reservations`)}
           badge={pendingCount > 0 ? pendingCount : undefined}
+        />
+      </Section>
+
+      <Section title="Help">
+        {/* Support tickets aren't shop-scoped in v1 — this links to the
+            shared /support area so the owner sees all their tickets. */}
+        <NavItem
+          href="/support"
+          icon={LifeBuoy}
+          label="Support"
+          active={pathname === "/support" || pathname.startsWith("/support/")}
         />
       </Section>
 

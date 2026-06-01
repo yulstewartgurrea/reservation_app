@@ -1,0 +1,8 @@
+Hi {{ user_name }},
+
+Ticket #{{ ticket.id }} ({{ ticket.subject }}) is now {{ new_status_label }}.
+
+Open the ticket:
+{{ ticket_url }}
+
+— BookMe Support

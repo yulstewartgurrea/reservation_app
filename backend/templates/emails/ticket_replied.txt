@@ -1,0 +1,12 @@
+Hi {{ recipient_name }},
+
+There's a new reply on ticket #{{ ticket.id }}: {{ ticket.subject }}
+
+From: {{ author_name }}
+
+{{ message.body }}
+
+Open the conversation:
+{{ ticket_url }}
+
+— BookMe Support
