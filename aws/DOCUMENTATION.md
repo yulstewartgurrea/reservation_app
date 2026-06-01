@@ -3,8 +3,11 @@
 Companion reference to [aws/README.md](README.md). The README is the quick-start; this document
 explains how the stack is built, why it's structured the way it is, and how to operate it day-to-day.
 
-> Scope: this Terraform deploys only the **Django backend** ([backend/](../backend/)) and its
-> supporting AWS services. The Next.js frontend is hosted elsewhere (Vercel / Amplify / etc.).
+> Scope: this Terraform deploys the **Django backend** ([backend/](../backend/)) plus its
+> supporting AWS services (ECS, RDS, ElastiCache, SSM, SES, S3 media), and the **Next.js
+> frontend** as a static export to S3 + CloudFront (the `frontend_hosting` layer). CloudFront
+> serves the SPA and reverse-proxies `/api/*` + `/ws/*` to the internal ALB, so the app is
+> same-origin. Both `stage` and `prod` environments are live.
 
 ---
 
@@ -21,8 +24,9 @@ explains how the stack is built, why it's structured the way it is, and how to o
 9. [Security model](#9-security-model)
 10. [Cost breakdown](#10-cost-breakdown)
 11. [Troubleshooting](#11-troubleshooting)
-12. [Extending the stack](#12-extending-the-stack)
+12. [Production deploy runbook](#12-production-deploy-runbook)
 13. [CI/CD with GitHub Actions](#13-cicd-with-github-actions)
+14. [Extending the stack](#14-extending-the-stack)
 
 ---
 
@@ -33,8 +37,8 @@ explains how the stack is built, why it's structured the way it is, and how to o
                                 │            Internet                       │
                                 └────────────────┬─────────────────────────┘
                                                  │
-                                  (no public endpoint in stage today —
-                                   see "Adding a domain" in README)
+                                  (public via CloudFront — staging.bookme.ph
+                                   for stage, bookme.ph + www.bookme.ph for prod)
                                                  │
    ╔══════════════════════════════════════════════════════════════════════╗
    ║   AWS account · region: ap-southeast-1 (Singapore)                    ║
@@ -73,18 +77,20 @@ explains how the stack is built, why it's structured the way it is, and how to o
    ║   ECR (image registry)    SSM (config + secrets)   S3 (media uploads) ║
    ║   ┌──────────────────┐    ┌────────────────────┐   ┌────────────────┐ ║
    ║   │ reservation/     │    │ /reservation/      │   │ s3-reservation │ ║
-   ║   │ stage/api:latest │    │ stage/* (KMS)      │   │ -stage-media   │ ║
+   ║   │ <env>/api:<tag>  │    │ <env>/* (KMS)      │   │ -<env>-media   │ ║
    ║   └──────────────────┘    └────────────────────┘   └────────────────┘ ║
    ╚══════════════════════════════════════════════════════════════════════╝
 ```
+
+Both `stage` and `prod` follow this exact shape in the same AWS account, isolated by VPC CIDR (`10.244.0.0/20` vs `10.245.0.0/20`), resource-name prefix (`reservation-stage-*` vs `reservation-prod-*`), and IAM-scoped SSM parameter paths (`/reservation/stage/*` vs `/reservation/prod/*`). See § 12 [Production deploy runbook](#12-production-deploy-runbook) for the prod-specific sizing (Multi-AZ RDS, Redis failover, IMMUTABLE ECR).
 
 ### Why this shape
 
 | Decision | Reason |
 |---|---|
 | **One internal ALB, three ECS services** | API needs an HTTP entry point; Celery worker/beat don't. Same image for all three keeps the deploy story simple. |
-| **Internal ALB (no public LB) for stage** | Stage doesn't have a domain yet → no ACM cert → no public HTTPS. Internal ALB keeps everything safely VPC-scoped until you're ready. |
-| **Single NAT Gateway** | Two NATs cost double for ~zero stage benefit. Trade resilience for ~$32/mo. Flip `single_nat_gateway = false` for prod. |
+| **Internal ALB + CloudFront VPC Origin** | The ALB stays VPC-internal; CloudFront reaches it via a VPC Origin and terminates TLS at the edge using ACM certs. Same-origin `/api/*` + `/ws/*` behaviours mean no CORS and no per-domain frontend rebuild. |
+| **Single NAT Gateway** (both envs) | Two NATs cost double for ~zero benefit at current traffic. Both envs accept this SPOF for outbound from private subnets. Flip `single_nat_gateway = false` later if outbound resilience becomes critical. |
 | **VPC endpoints for ECR/S3/Logs** | Avoids paying NAT egress on every image pull and log shipment. |
 | **db.t4g.micro + cache.t3.micro** | Cheap stage profile. Postgres `t4g.micro` is ARM-based; pairs well with the existing Django image. |
 | **Postgres 17.4** | AWS deprecated 16.4 in `ap-southeast-1`; 17 is forward-compatible with the local `postgres:16-alpine` for Django's purposes (engine major is what matters for app behavior). |
@@ -522,20 +528,19 @@ value — see `parameters` layer notes).
 
 ## 6. The boot path: how an HTTP request reaches Django
 
-> Today there's no public entry point. Once you add a domain + CloudFront, the path looks like:
-
 ```
-1. Client → https://api.your-domain.com/api/bookings/
-2. CloudFront → forwards to internal ALB DNS (via VPC origin)
-3. Internal ALB → matches path_pattern *  → target group tg-svc-ecs-reservation-stage-api
+1. Client → https://bookme.ph/api/bookings/        (prod; stage uses staging.bookme.ph)
+2. CloudFront → matches /api/* behavior, forwards to internal ALB (via VPC Origin)
+3. Internal ALB → matches path_pattern *  → target group tg-svc-ecs-reservation-<env>-api
 4. Target group → load-balances across registered ECS task ENIs
 5. ECS task → Daphne ASGI server on container port 8000
 6. Daphne → Django ASGI app (config.asgi:application)
 7. Django → DRF view → ORM → Postgres / Redis / Celery
 ```
 
-For now (no domain), step 1-3 are missing and you reach step 4 only from inside the VPC
-(bastion, port-forward, or temporarily flipping `create_external_load_balancer = true`).
+`/ws/*` follows the same path with WebSocket upgrade enabled on the CloudFront behaviour.
+
+The ALB stays VPC-internal — direct access from a developer laptop still requires a bastion, SSM port-forward, or temporarily flipping `create_external_load_balancer = true` in region.hcl (don't do this in prod).
 
 ---
 
@@ -580,7 +585,9 @@ reads `os.environ` like in local dev. The Docker image is identical to the one i
 
 ## 8. Operational runbook
 
-### Initial deploy (~10 min)
+### Stage: initial deploy (~10 min)
+
+> For the prod initial deploy, see § 12 [Production deploy runbook](#12-production-deploy-runbook) — it's a different sequence (chicken-and-egg bootstrap, SES domain verification, IMMUTABLE ECR).
 
 ```bash
 # (1) one-time: create the state bucket
@@ -629,7 +636,7 @@ aws ecs update-service --cluster ecs-reservation-stage \
 The image tag is `:latest` — `update-service` is the only signal ECS gets. Consider switching to
 SHA tags + Terraform-managed task definitions for production (see "Extending the stack").
 
-### Rotate a secret
+### Stage: rotate a secret
 
 ```bash
 aws ssm put-parameter \
@@ -645,6 +652,25 @@ aws ecs update-service --cluster ecs-reservation-stage \
 ```
 
 ECS only reads SSM at task **start** — running containers keep the old value until restarted.
+
+### Prod: rotate a secret
+
+```bash
+aws ssm put-parameter \
+  --name /reservation/prod/PAYMONGO_SECRET_KEY \
+  --type SecureString --overwrite \
+  --value <new-value> \
+  --region ap-southeast-1 --profile reservation-stage
+
+# Force-cycle every service that consumes the secret (api, worker, beat).
+for SVC in api celery-worker celery-beat; do
+  aws ecs update-service --cluster ecs-reservation-prod \
+    --service svc-ecs-reservation-prod-$SVC --force-new-deployment \
+    --region ap-southeast-1 --profile reservation-stage
+done
+```
+
+Same caveat as stage — SSM is read at task start, so rotation only takes effect after the rolling deploy completes. For prod prefer doing this during a quiet window since the api service rolls one task at a time.
 
 ### Tail logs
 
@@ -755,7 +781,7 @@ Verify: `https://staging.bookme.ph` serves the app **and** "Browse shops" loads 
 
 > **Domain-cutover gotcha (we hit this):** a custom domain in front of CloudFront is useless if the SPA was built pointing its API at a *different* host. The frontend is built same-origin (relative `/api`, `wss://<current-host>/ws`) precisely so any domain works with zero per-domain rebuild — see [README → CloudFront single-origin](../README.md) and `frontend/src/lib/api.ts`. Step (5) is the one that bites when adding the prod `bookme.ph` domain later.
 
-**Prod (`bookme.ph` + `www.bookme.ph`)** is wired in code (`frontend_domains` in prod `region.hcl`) but **inert** — prod has only the `frontend_hosting` skeleton; no prod `networking/rds/redis/ecs/ses/parameters` layers exist yet. Standing up the prod backend stack is a separate effort. Once it exists, `cd aws/accounts/prod/ap-southeast-1/frontend_hosting && terragrunt apply` adds the apex/www cert + alias records into the same zone (no second nameserver change — same `bookme.ph` zone). Until then, do **not** apply prod `frontend_hosting` expecting a working site: the static export would load with no API behind it.
+**Prod (`bookme.ph` + `www.bookme.ph`)** is **live.** All 10 prod layers (`ci`, `networking`, `ecr`, `parameters`, `storage`, `rds`, `redis`, `ses`, `ecs`, `frontend_hosting`) are applied. The end-to-end deploy is documented in § 12 [Production deploy runbook](#12-production-deploy-runbook); push to `main` triggers the same CI workflow used for stage but resolves to the `prod` GitHub Environment.
 
 ### Frontend: deploy new code
 
@@ -912,10 +938,9 @@ Common causes:
 ### Cannot reach the ALB from my laptop
 
 The ALB is **internal** — DNS resolves only inside the VPC. Options:
-- Set up a bastion + SSH port-forward
-- Use AWS Systems Manager Session Manager port-forward to an EC2 in the private subnet
-- Temporarily flip `create_external_load_balancer = true` in region.hcl (only for short-lived debugging — exposes the API to the internet)
-- Add a domain + CloudFront (see README)
+- Use the public URL — `https://staging.bookme.ph` (stage) / `https://bookme.ph` (prod) — for normal API access. The ALB is reachable end-to-end via CloudFront's `/api/*` + `/ws/*` behaviours.
+- For raw ALB access (e.g. debugging a CloudFront-specific issue): bastion + SSH port-forward, or AWS Systems Manager Session Manager port-forward to an EC2 in the private subnet.
+- Temporarily flip `create_external_load_balancer = true` in region.hcl (only for short-lived stage debugging — exposes the API to the internet, never do this on prod).
 
 ### `terragrunt run-all apply` hangs on networking
 
@@ -938,123 +963,322 @@ aws ssm put-parameter \
   --region ap-southeast-1 --profile reservation-stage
 ```
 
+### `docker push` to ECR returns 403 even with a fresh login
+
+**Root cause:** `AWS_PROFILE` (or active credentials) is pointing at a different account than the ECR repo lives in. The `aws ecr get-login-password` call succeeds against the wrong account, but the resulting docker login token is scoped to that wrong account — pushing to a repo it doesn't own returns 403 with no "wrong account" hint in the error body. This is easy to hit when juggling multiple `~/.aws/credentials` profiles.
+
+```bash
+aws sts get-caller-identity   # must show Account = 936146782254 (per accounts/global.hcl)
+```
+
+If the account doesn't match:
+
+```bash
+export AWS_PROFILE=reservation-stage
+aws ecr get-login-password --region ap-southeast-1 \
+  | docker login --username AWS --password-stdin \
+      936146782254.dkr.ecr.ap-southeast-1.amazonaws.com
+docker push ...   # retry
+```
+
+The previous docker login token is bound to the wrong account, so re-running `aws ecr get-login-password | docker login` with the right profile is required — clearing `~/.docker/config.json` for that registry also works.
+
+### `bookme.ph` shows raw `<Error><Code>AccessDenied</Code>...</Error>` XML
+
+**Root cause:** The S3 origin bucket is empty — no `index.html` to serve. CloudFront forwards S3's error response unmodified, so the browser sees S3's XML rather than a nice 404 page. This happens on the very first prod hit before frontend-deploy.yml has populated the bucket.
+
+**Fix:** push to `main` to trigger [.github/workflows/frontend-deploy.yml](../.github/workflows/frontend-deploy.yml), or do the manual upload:
+
+```bash
+cd frontend
+npm ci && npm run build
+aws s3 sync out/ s3://s3-reservation-prod-frontend/ --delete --region ap-southeast-1
+aws cloudfront create-invalidation \
+  --distribution-id <prod-distribution-id> --paths '/*' --region ap-southeast-1
+```
+
 ---
 
-## 12. Extending the stack
+## 12. Production deploy runbook
 
-### Adding a production environment
+This documents the actual sequence used to stand up prod (applied 2026-05-31 → 2026-06-01). It supersedes the older "Adding a production environment" 6-step sketch, which assumed a multi-account setup we ultimately didn't use.
 
-1. Create `aws/accounts/prod/account.hcl` (mirror stage).
-2. Add `prod_account_id` + `prod_profile_name` to [accounts/global.hcl](accounts/global.hcl).
-3. Create `aws/accounts/prod/ap-southeast-1/region.hcl` — copy stage and bump:
-   - `env = "prod"`, `env_type = "prod"`
-   - VPC CIDR to something non-overlapping
-   - `multi_az = true`, `deletion_protection = true` on RDS
-   - `automatic_failover_enabled = true`, `num_cache_clusters = 2` on Redis
-   - Bigger instance classes
-4. Create the prod state bucket.
-5. Stub out each layer dir under `prod/ap-southeast-1/` (same 7 stubs as stage).
-6. Apply.
+**Prod is currently live** — `bookme.ph` and `www.bookme.ph` both serve the prod CloudFront distribution, all 10 prod Terragrunt layers are applied, and CI auto-deploys on push to `main`. This runbook captures *how we got there* so the same flow can be re-run after a tear-down or replicated in another region/account.
 
-### Adding a domain (CloudFront + Route 53 + ACM + WebSocket public ALB)
+### Single-account model recap
 
-See [README.md § "Adding a domain later"](README.md#adding-a-domain-later) for the high-level
-steps. The four layers to port from the Elated baseline are:
-- `cloudfront/` — public HTTPS entry point with VPC origin
-- `route53/` — DNS records (hosted zone optional)
-- `ses/` — verified domain identity for transactional email
-- `websocket/` — separate public ALB for Channels WebSocket traffic (port 8000, sticky sessions, /healthz)
+Both stage and prod live in account `936146782254` (see [accounts/global.hcl](accounts/global.hcl)), in `ap-southeast-1`. The same AWS profile (`reservation-stage`) is used for both — separation is by resource-name prefix (`reservation-stage-*` vs. `reservation-prod-*`), VPC CIDR, and KMS-protected `/reservation/${env}/*` SSM paths. The execution-role IAM scoping in [aws/layers/ecs/main.tf](layers/ecs/main.tf) is what enforces that a stage task can't read prod params and vice versa.
 
-### Switching to SHA-tagged deploys
+### Prerequisites
 
-For reproducible deploys + easy rollback:
+```bash
+export AWS_PROFILE=reservation-stage
+aws sts get-caller-identity   # must return Account = 936146782254
+```
 
-1. Push images as `<short-sha>` instead of `:latest`.
-2. Move the container `image` field in [region.hcl](accounts/stage/ap-southeast-1/region.hcl) to a variable, e.g. `var.api_image_tag`.
-3. CI sets `TF_VAR_api_image_tag=<sha>` and runs `terragrunt apply` on the `ecs` layer.
+If the account doesn't match, fix `AWS_PROFILE` (or `~/.aws/credentials`) before doing anything else — see Troubleshooting "docker push returns 403". Every command below assumes this profile.
 
-### Media uploads with S3
+Other prep:
+- **DJANGO_SECRET_KEY for prod.** Generate a fresh value (`python -c 'from django.core.management.utils import get_random_secret_key; print(get_random_secret_key())'`), drop it into [aws/accounts/prod/ap-southeast-1/parameters/env.yaml](accounts/prod/ap-southeast-1/parameters/env.yaml) for the first apply. After the parameters layer applies once, the values are no longer Terraform-managed (`lifecycle.ignore_changes = [value]`); overwrite directly via `aws ssm put-parameter --overwrite` and revert the file to a placeholder so the real value never lands in git.
+- **SES domain verification.** In the SES console (region `ap-southeast-1`): Identities → Create identity → Domain → `bookme.ph` → enable **Easy DKIM**. SES emits 3 `CNAME` records; add them to the `bookme.ph` hosted zone (owned by the stage `dns` layer in [accounts/stage/ap-southeast-1/dns/](accounts/stage/ap-southeast-1/dns/)). Wait for the identity to show **Verified** before applying the prod `ses` layer — otherwise the layer will create an unusable identity.
+- **Request SES production access** for the account if you haven't already — sandbox sends silently bounce for non-verified recipients. Approval is typically 24-48h; do this in parallel with everything else.
 
-Already wired — see the [`storage` layer reference](#storage) above for how
-Django, the SSM parameter and the task IAM policy fit together. The bucket
-stays private; URLs are presigned with a 6-hour expiry.
+### Prod-specific configuration
+
+The knobs that differ from stage live in [aws/accounts/prod/ap-southeast-1/region.hcl](accounts/prod/ap-southeast-1/region.hcl):
+
+| Knob | Prod | Stage | Why |
+|---|---|---|---|
+| `cidr` | `10.245.0.0/20` | `10.244.0.0/20` | Non-overlapping VPCs in the same account |
+| `single_nat_gateway` | `true` | `true` | Cost over HA — accepted SPOF for outbound traffic from private subnets |
+| `create_database_internet_gateway_route` | `false` | `true` | No public RDS endpoint at all |
+| `rds_publicly_accessible` | `false` | `true` (allowlisted) | Prod Postgres is VPC-internal only; reach via bastion/SSM |
+| `db_allowed_cidrs` | `[]` | dev `/32` list | n/a — public access disabled |
+| `multi_az` (RDS) | `true` | `false` | Sub-60s failover; ~2× RDS cost |
+| `instance_class` (RDS) | `db.t4g.small` | `db.t4g.micro` | 2 GB RAM headroom |
+| `deletion_protection` (RDS) | `true` | `false` | Two-step gate against accidental destroy |
+| `node_type` (Redis) | `cache.t3.small` | `cache.t3.micro` | Smallest tier supporting `automatic_failover_enabled` |
+| `num_cache_clusters` (Redis) | `2` | `1` | Primary + replica across AZs |
+| `automatic_failover_enabled` (Redis) | `true` | `false` | Required for Channels/Celery continuity on AZ outage |
+| `image_tag_mutability` (ECR) | `IMMUTABLE` | `MUTABLE` | Pushed `<sha>` and the bootstrap `:latest` are write-once |
+| `verified_email` (SES) | `noreply@bookme.ph` | personal address | Domain-based sender |
+| `frontend_domains` | `["bookme.ph", "www.bookme.ph"]` | `["staging.bookme.ph"]` | Apex + www both alias the prod distribution |
+| `github_environments` | `["prod"]` | `["staging"]` | OIDC `sub` claim restricts who can assume the deploy role |
+| `create_oidc_provider` | `false` | `false` | Stage's `frontend_hosting` already created the singleton |
+
+### Apply order (the sequence we actually used)
+
+The dependency DAG allows several layers to apply in parallel within each phase. Run each `terragrunt apply` from its own directory under `aws/accounts/prod/ap-southeast-1/`.
+
+#### Phase 1 — Independent (run anytime, produces GitHub Environment values)
+
+```bash
+cd aws/accounts/prod/ap-southeast-1/ci
+terragrunt apply
+
+cd ../frontend_hosting
+terragrunt apply
+# Outputs: bucket_name, cloudfront_distribution_id, github_deploy_role_arn
+```
+
+Stage already created the GitHub OIDC provider (singleton per account). Both prod layers consume it: `frontend_hosting` via [prod/frontend_hosting/terragrunt.hcl](../aws/accounts/prod/ap-southeast-1/frontend_hosting/terragrunt.hcl) `inputs.github_oidc_provider_arn`, and `ci` via `create_oidc_provider = false` in [prod region.hcl](accounts/prod/ap-southeast-1/region.hcl).
+
+#### Phase 2 — Networking (~5 min for NAT Gateway)
+
+```bash
+cd ../networking
+terragrunt apply
+```
+
+#### Phase 3 — Config + storage + registry (parallel-safe)
+
+```bash
+cd ../parameters && terragrunt apply &
+cd ../ecr && terragrunt apply &
+cd ../storage && terragrunt apply &
+wait
+```
+
+`parameters` reads `parameters/env.yaml` and creates the `/reservation/prod/*` SSM tree. After this first apply, overwrite real secret values with `aws ssm put-parameter --overwrite` and put placeholders back in `env.yaml`.
+
+#### Phase 4 — Databases + email (need VPC; SES needs the domain verified)
+
+```bash
+cd ../rds && terragrunt apply   # ~10 min, longest single step
+cd ../redis && terragrunt apply
+cd ../ses && terragrunt apply   # requires the SES identity to already show "Verified"
+```
+
+#### Phase 5 — Bootstrap the first ECR image
+
+ECS can't start tasks until an image exists in the prod ECR repo. CI doesn't help yet (see Phase 6 caveat), so push manually:
+
+```bash
+ACCT=936146782254
+aws ecr get-login-password --region ap-southeast-1 \
+  | docker login --username AWS --password-stdin $ACCT.dkr.ecr.ap-southeast-1.amazonaws.com
+
+# --platform linux/amd64 is required on Apple Silicon — prod Fargate runs X86_64
+# (see runtime_platform_x86 in prod region.hcl).
+docker build --platform linux/amd64 -t reservation-api:bootstrap ./backend
+docker tag reservation-api:bootstrap \
+  $ACCT.dkr.ecr.ap-southeast-1.amazonaws.com/reservation/prod/api:latest
+docker push $ACCT.dkr.ecr.ap-southeast-1.amazonaws.com/reservation/prod/api:latest
+```
+
+**IMMUTABLE caveat:** prod's ECR repo (`image_tag_mutability = "IMMUTABLE"`) means `:latest` can only be pushed **once**. From here on every deploy uses SHA tags. If you ever need to re-bootstrap (e.g. after a `terragrunt destroy`), either delete the `latest` tag in ECR first or push a different bootstrap tag and pass it to step 6.
+
+#### Phase 6 — ECS (~5-7 min)
+
+```bash
+cd ../ecs
+API_IMAGE_TAG=latest terragrunt apply
+```
+
+`API_IMAGE_TAG` defaults to `latest` (see [prod region.hcl](accounts/prod/ap-southeast-1/region.hcl) `api_image_tag = get_env("API_IMAGE_TAG", "latest")`) so passing it explicitly is belt-and-suspenders for the bootstrap. After the first deploy, CI sets `API_IMAGE_TAG=<short-sha>` and we never use `:latest` for prod again.
+
+#### Phase 7 — Backfill `DJANGO_ALLOWED_HOSTS` and cycle tasks
+
+The ECS task definition references `/reservation/prod/DJANGO_ALLOWED_HOSTS`, but the ALB DNS name isn't known until the ecs layer applies — so the placeholder in `env.yaml` is wrong on first boot. Health checks from the ALB hit the task's IP directly, but the `/health/` view (and any forwarded request) gets rejected by Django's `ALLOWED_HOSTS` middleware until we update it:
+
+```bash
+# Look up the ALB DNS name
+aws elbv2 describe-load-balancers \
+  --query "LoadBalancers[?contains(LoadBalancerName, 'reservation-prod')].DNSName" \
+  --output text --region ap-southeast-1
+
+aws ssm put-parameter \
+  --name /reservation/prod/DJANGO_ALLOWED_HOSTS \
+  --type String --overwrite \
+  --value "bookme.ph,www.bookme.ph,<alb-dns-name>,.amazonaws.com" \
+  --region ap-southeast-1
+
+# Force-cycle so containers pick up the new value
+for SVC in api celery-worker celery-beat; do
+  aws ecs update-service --cluster ecs-reservation-prod \
+    --service svc-ecs-reservation-prod-$SVC --force-new-deployment \
+    --region ap-southeast-1
+done
+```
+
+#### Phase 8 — First frontend build/deploy
+
+Two options:
+
+```bash
+# Option A — let CI do it (preferred)
+git push origin main      # any change touching frontend/** triggers frontend-deploy.yml
+
+# Option B — manual, mirroring the workflow's recipe
+cd frontend
+npm ci && npm run build   # produces ./out
+aws s3 sync out/ s3://s3-reservation-prod-frontend/ --delete \
+  --region ap-southeast-1
+aws cloudfront create-invalidation \
+  --distribution-id <prod-distribution-id> --paths '/*' \
+  --region ap-southeast-1
+```
+
+Until you complete Phase 8, hitting `https://bookme.ph` returns CloudFront's pass-through of S3's `AccessDenied` XML — see Troubleshooting "bookme.ph shows raw AccessDenied XML".
+
+### GitHub `prod` Environment setup
+
+Settings → Environments → **New environment** → name `prod`. Add four **Variables** (not Secrets — these are non-sensitive ARNs/names):
+
+| GitHub Variable | Where it comes from |
+|---|---|
+| `AWS_BACKEND_DEPLOY_ROLE_ARN` | `cd aws/accounts/prod/ap-southeast-1/ci && terragrunt output -raw deployer_role_arn` |
+| `AWS_DEPLOY_ROLE_ARN` | `cd aws/accounts/prod/ap-southeast-1/frontend_hosting && terragrunt output -raw github_deploy_role_arn` |
+| `AWS_S3_BUCKET` | `terragrunt output -raw bucket_name` (in the same frontend_hosting dir) |
+| `AWS_CLOUDFRONT_DISTRIBUTION_ID` | `terragrunt output -raw cloudfront_distribution_id` (same dir) |
+
+**Do NOT set `NEXT_PUBLIC_API_URL`** — the frontend talks to `/api` same-origin via CloudFront, so leaving it unset is correct (a baked-in absolute URL would force CORS and break the cutover). See § "Custom domain" and [README → Troubleshooting: Site loads but API calls return Network Error](../README.md).
+
+Recommended protections under Environments → prod → **Protection rules**:
+- **Required reviewers** — at least one named reviewer (yourself) so prod deploys require an explicit click.
+- **Deployment branches** → "Selected branches" → only allow `main`.
+
+The same set of variables under the same names already exists in the `staging` environment — keeping them per-env (not repo-level) is what lets the `resolve` job in [backend-deploy.yml](../.github/workflows/backend-deploy.yml) flip between them based on branch.
+
+### Day-2 ops for prod
+
+| Trigger | Effect |
+|---|---|
+| `git push origin main` touching `backend/**` or `aws/**` | Runs [backend-deploy.yml](../.github/workflows/backend-deploy.yml): tests → build & push SHA-tagged image to prod ECR → register & run migrate task → `terragrunt apply` on the prod `ecs` layer → wait for services-stable |
+| `git push origin main` touching `frontend/**` | Runs [frontend-deploy.yml](../.github/workflows/frontend-deploy.yml): build → `aws s3 sync` to prod bucket → CloudFront invalidation |
+| Actions → **Backend deploy** → Run workflow → `environment=prod`, `image_tag=<old-sha>` | Manual rollback — skips build, validates the tag exists in ECR, re-runs migrations + ECS rollout |
+| Actions → **Backend deploy** → Run workflow → `environment=prod` (no image_tag) | Emergency deploy from a non-`main` branch — uses the workflow's current HEAD SHA |
+
+### Rollback
+
+The image is already in ECR with a SHA tag (CI tagged it during the original deploy). Trigger Actions → **Backend deploy** → **Run workflow** with `environment=prod` and `image_tag=<the previous good SHA>`. The build step will verify the tag exists, then migrate + ECS rollout proceed. End-to-end ~5 min.
+
+For a frontend-only rollback, push the previous good commit (or `git revert <bad-sha>` + PR + merge) — frontend-deploy.yml re-syncs S3 and invalidates CloudFront.
+
+Schema migrations require manual care: rolling back to a code version that can't read the current schema means manually reverting the migration first (via `aws ecs execute-command` on a running api task, `python manage.py migrate <app> <previous_migration>`). See § 13 CI/CD → "Redeploy / rollback" for the same caveat on stage.
 
 ---
 
 ## 13. CI/CD with GitHub Actions
 
-Push to `main` → tests run → image is built and pushed to ECR with a SHA tag → migrations run as
-a one-shot ECS task → ECS services roll over to the new image. Auth is via **GitHub OIDC** — no
-long-lived AWS access keys live in the repo.
+Push to `staging` → deploys stage. Push to `main` → deploys prod. Tests run once, image is built and pushed to the env-specific ECR repo with a SHA tag, migrations run as a one-shot ECS task, ECS services roll over to the new image. Auth is via **GitHub OIDC** — no long-lived AWS access keys live in the repo.
 
 ### Pipeline shape
 
 ```
-push to main (touching backend/ or aws/)
+push to staging  →  GitHub Environment: staging  →  reservation/stage/api  →  ecs-reservation-stage
+push to main     →  GitHub Environment: prod     →  reservation/prod/api   →  ecs-reservation-prod
      │
      ▼
-┌────────────┐    ┌─────────────────┐    ┌───────────────────┐    ┌──────────────────────┐
-│  test      │──▶│  build & push   │──▶│  migrate          │──▶│  deploy              │
-│            │   │                 │   │                   │   │                       │
-│ Postgres + │   │ docker build →  │   │ register one-off  │   │ TF_VAR-style override │
-│ Redis svc  │   │ ECR push (SHA + │   │ task def from     │   │ API_IMAGE_TAG=<sha>   │
-│ containers │   │ latest tags)    │   │ API template,     │   │ → terragrunt apply    │
-│ → manage.py│   │                 │   │ run as Fargate    │   │   on ecs layer        │
-│   test     │   │                 │   │ task, wait for    │   │ → wait for services-  │
-│            │   │                 │   │ exit code 0       │   │   stable              │
-└────────────┘    └─────────────────┘    └───────────────────┘    └──────────────────────┘
+┌────────────┐    ┌────────────┐    ┌─────────────────┐    ┌───────────────────┐    ┌──────────────────────┐
+│  test      │──▶│  resolve   │──▶│  build & push   │──▶│  migrate          │──▶│  deploy              │
+│            │   │            │   │                 │   │                   │   │                       │
+│ Postgres + │   │ branch →   │   │ docker build →  │   │ register one-off  │   │ TF_VAR-style override │
+│ Redis svc  │   │ env →      │   │ ECR push (SHA + │   │ task def from     │   │ API_IMAGE_TAG=<sha>   │
+│ containers │   │ resource   │   │ latest tags)    │   │ API template,     │   │ → terragrunt apply    │
+│ → manage.py│   │ names      │   │                 │   │ run as Fargate    │   │   on ecs layer        │
+│   test     │   │            │   │                 │   │ task, wait for    │   │ → wait for services-  │
+│            │   │            │   │                 │   │ exit code 0       │   │   stable              │
+└────────────┘    └────────────┘    └─────────────────┘    └───────────────────┘    └──────────────────────┘
 
-  test job: any failure aborts everything downstream.
-  build:    when redeploying (workflow_dispatch with image_tag), this step verifies the existing
-            image rather than rebuilding.
-  migrate:  if exit code != 0, the deploy job is skipped and old tasks keep serving.
-  deploy:   image tag drives a new task definition revision; ECS does a rolling deploy.
+  test job:     environment-agnostic — spins up its own Postgres + Redis service containers.
+  resolve job:  maps git ref → env. workflow_dispatch overrides the mapping for emergency deploys.
+                Exports ecs_cluster, api_service, worker_service, beat_service, tg_working_dir to
+                downstream jobs so no resource name is hardcoded.
+  build:        when redeploying (workflow_dispatch with image_tag), this step verifies the
+                existing image in the env-specific ECR repo rather than rebuilding.
+  migrate:      if exit code != 0, the deploy job is skipped and old tasks keep serving.
+  deploy:       per-env concurrency (`backend-deploy-${environment}`) — stage and prod can deploy
+                in parallel, but two pushes to the same env queue rather than race.
 ```
 
 ### Files
 
 | File | What it is |
 |---|---|
-| [`.github/workflows/backend-deploy.yml`](../.github/workflows/backend-deploy.yml) | The pipeline definition |
+| [`.github/workflows/backend-deploy.yml`](../.github/workflows/backend-deploy.yml) | The multi-env pipeline definition (staging branch → staging env, main branch → prod env) |
 | [`.github/workflows/README.md`](../.github/workflows/README.md) | Workflow setup + rollback notes |
-| [`aws/layers/ci/`](layers/ci/) | Terraform: GitHub OIDC provider + deployer IAM role |
+| [`aws/layers/ci/`](layers/ci/) | Terraform: per-env deployer IAM role (reuses the account-singleton GitHub OIDC provider created by stage `frontend_hosting`) |
 | [`aws/accounts/stage/ap-southeast-1/ci/terragrunt.hcl`](accounts/stage/ap-southeast-1/ci/terragrunt.hcl) | Stage stub for the CI layer |
+| [`aws/accounts/prod/ap-southeast-1/ci/terragrunt.hcl`](accounts/prod/ap-southeast-1/ci/terragrunt.hcl) | Prod stub for the CI layer |
 
-### One-time setup
+### One-time setup (per environment)
 
-1. **Apply the `ci` layer once** (locally, with admin creds), so the OIDC provider + deployer role exist:
+Both stage and prod follow the same shape — only the directory and GitHub Environment name differ.
+
+1. **Apply the `ci` layer once** (locally, with admin creds), so the per-env deployer role exists:
    ```bash
-   cd aws/accounts/stage/ap-southeast-1/ci
+   cd aws/accounts/<env>/ap-southeast-1/ci    # <env> = stage or prod
    terragrunt apply
    ```
 
 2. **Grab the role ARN:**
    ```bash
    terragrunt output -raw deployer_role_arn
-   # → arn:aws:iam::<account>:role/role-github-actions-reservation-stage-deployer
+   # → arn:aws:iam::<account>:role/role-github-actions-reservation-<env>-deployer
    ```
 
 3. **In GitHub:**
-   - Settings → Environments → **New environment** → name it `staging`
-     (Optional: add yourself as a required reviewer for click-to-deploy gates.)
-   - Settings → Secrets and variables → Actions → **Variables** tab → New repository variable:
-     - Name: `AWS_BACKEND_DEPLOY_ROLE_ARN`
-     - Value: the ARN from step 2
-     - (The frontend deploy workflow uses `AWS_DEPLOY_ROLE_ARN` — these are distinct variables.)
+   - Settings → Environments → **New environment** → name it `staging` (or `prod`).
+     For prod, configure protection rules: required reviewers + restrict deployment branches to `main`.
+   - In that Environment → Variables → add `AWS_BACKEND_DEPLOY_ROLE_ARN` = the ARN from step 2.
+     (Per-Environment Variables — the same name lives in both. The workflow's `resolve` job picks the right one via `environment: ${{ needs.resolve.outputs.environment }}`.)
+   - The frontend deploy workflow uses three additional per-env Variables (`AWS_DEPLOY_ROLE_ARN`, `AWS_S3_BUCKET`, `AWS_CLOUDFRONT_DISTRIBUTION_ID`) — see § 12 "GitHub `prod` Environment setup" and the README "Frontend deploy" section.
 
-4. **Push to `main`.** The workflow fires; first deploy takes ~6-8 min.
+4. **Push to the matching branch.** `staging` branch deploys to stage; `main` deploys to prod. First deploy takes ~6-8 min.
 
 ### Trust policy — what the role accepts
 
-The OIDC trust policy (in [layers/ci/main.tf](layers/ci/main.tf)) allows the role to be assumed
-**only** when these claims are present on the GitHub token:
+The OIDC trust policy (in [layers/ci/main.tf](layers/ci/main.tf)) allows each per-env role to be assumed **only** when these claims are present on the GitHub token:
 
-- `aud == sts.amazonaws.com` — standard for AWS OIDC
-- `sub LIKE repo:<github_repo>:environment:<env>` — for any `<env>` in `github_environments`
+- `aud == sts.amazonaws.com` — standard for AWS OIDC.
+- `sub LIKE repo:<github_repo>:environment:<env>` — for any `<env>` in that env's `github_environments` list.
 
-Since the workflow declares `environment: staging`, the sub claim is
-`repo:yulstewartgurrea/reservation_app:environment:staging`. Any push from another repo, branch,
-or environment is rejected at the STS layer.
+Concretely:
+- Stage role accepts `repo:yulstewartgurrea/reservation_app:environment:staging`.
+- Prod role accepts `repo:yulstewartgurrea/reservation_app:environment:prod`.
+
+Because the trust policy keys on the GitHub Environment claim, not on a branch ref, a workflow that forgot to set `environment:` would fail STS assume regardless of which branch it ran on. The `resolve` + per-job `environment: ${{ needs.resolve.outputs.environment }}` pattern in the workflow ensures the right claim ends up in the token for whichever branch fired the run.
 
 ### Permissions of the deployer role
 
@@ -1085,46 +1309,73 @@ GitHub UI → Actions → **Backend deploy** → Run workflow → enter a previo
 
 #### Skip the pipeline for an emergency manual fix
 
-If GitHub is down or you need to deploy faster than CI, you can repeat the steps locally:
+If GitHub is down or you need to deploy faster than CI, you can repeat the steps locally. Set `ENV` to `stage` or `prod` for the target.
 
 ```bash
+ENV=stage  # or prod
 ACCT=$(aws sts get-caller-identity --query Account --output text)
 SHA=$(git rev-parse --short=12 HEAD)
 aws ecr get-login-password --region ap-southeast-1 \
   | docker login --username AWS --password-stdin $ACCT.dkr.ecr.ap-southeast-1.amazonaws.com
-docker build -t reservation-api:$SHA ./backend
-docker tag reservation-api:$SHA $ACCT.dkr.ecr.ap-southeast-1.amazonaws.com/reservation/stage/api:$SHA
-docker push $ACCT.dkr.ecr.ap-southeast-1.amazonaws.com/reservation/stage/api:$SHA
+docker build --platform linux/amd64 -t reservation-api:$SHA ./backend
+docker tag reservation-api:$SHA $ACCT.dkr.ecr.ap-southeast-1.amazonaws.com/reservation/$ENV/api:$SHA
+docker push $ACCT.dkr.ecr.ap-southeast-1.amazonaws.com/reservation/$ENV/api:$SHA
 
-cd aws/accounts/stage/ap-southeast-1/ecs
+cd aws/accounts/$ENV/ap-southeast-1/ecs
 API_IMAGE_TAG=$SHA terragrunt apply
 ```
 
+Prod's ECR is IMMUTABLE — a SHA you've already pushed can't be re-pushed. If you need to re-cut from the same commit, append a suffix to `$SHA` (e.g. `${SHA}-hotfix1`).
+
 ### Why this design
 
-- **SHA tags, not `:latest`** — reproducible deploys, trivial rollback, no "what's actually running?" question.
+- **SHA tags, not `:latest`** — reproducible deploys, trivial rollback, no "what's actually running?" question. Reinforced for prod by IMMUTABLE ECR tags.
 - **Migrations as a one-off task, not in the API entrypoint** (well, *also* in the entrypoint as a safety net) — a bad migration aborts the deploy instead of looping crashed tasks.
 - **Terraform-managed task definition** — `API_IMAGE_TAG` env → Terragrunt → new task def revision. Image version is part of state; no drift between IaC and reality.
 - **OIDC over access keys** — short-lived credentials, revocable per-repo, no rotation overhead.
-- **`AmazonECS_FullAccess` is broader than ideal** — for prod, swap this for a custom policy scoped to the specific cluster ARN. Acceptable for stage.
+- **Per-env GitHub Environments** — same workflow file, different Variables, different IAM role per env, different concurrency group. Stage and prod never share credentials or block each other.
+- **`AmazonECS_FullAccess` is broader than ideal** — both stage and prod use it today. Acceptable trade-off given the trust policy is locked to the per-env GitHub Environment claim; if hardened later, swap for a custom policy scoped to the specific cluster ARN.
 
 ### CI/CD troubleshooting
 
 **`Error: Could not assume role with OIDC`**
-- The `AWS_BACKEND_DEPLOY_ROLE_ARN` variable is missing, has a typo, or points to the wrong account.
-- The workflow run isn't targeting the `staging` environment — check the job's `environment:` key.
-- The OIDC provider doesn't exist in the account — re-apply the `ci` layer.
+- The `AWS_BACKEND_DEPLOY_ROLE_ARN` variable is missing in the *target* Environment (not at the repo level — per-env Variable), has a typo, or points to the wrong account.
+- The workflow run isn't targeting the right environment — check the `resolve` job output and the per-job `environment:` key.
+- The OIDC provider doesn't exist in the account — re-apply stage's `frontend_hosting` layer (which creates the singleton) or stage `ci`.
 
 **`AccessDenied` from `aws ecs register-task-definition`**
-- Usually `iam:PassRole`. Check that the task role name (e.g. `role-svc-ecs-reservation-stage-api-task`) is in the `task_role_names` input of the ci layer. The ecs layer outputs the names; the ci layer reads them.
+- Usually `iam:PassRole`. Check that the task role names (e.g. `role-svc-ecs-reservation-<env>-api-task`) are in the `task_role_names` input of the ci layer for that env. The ecs layer outputs the names; the ci layer reads them.
 
 **Migration task starts but fails with `Could not connect to database`**
 - The task is using the API service's network config (private subnets + SGs). Check that the API service can reach the DB — if it can, so can the migrate task. If not, networking issue.
 
+**First prod deploy via CI fails with empty `CURRENT_TD_ARN`**
+- Chicken-and-egg — the migrate job clones the API service's existing task definition, but on first deploy that service has no running tasks yet. Bootstrap manually first per Phases 5–6 of § 12 [Production deploy runbook](#12-production-deploy-runbook), then push to `main`.
+
 **Pipeline succeeds but new code isn't live**
-- ECS rolling deploy can take 2-3 min after `services-stable` is signaled. Check task definition revision: `aws ecs describe-services --cluster ecs-reservation-stage --services svc-ecs-reservation-stage-api --query 'services[0].taskDefinition'` — should match the deploy step's output.
+- ECS rolling deploy can take 2-3 min after `services-stable` is signaled. Check task definition revision: `aws ecs describe-services --cluster ecs-reservation-<env> --services svc-ecs-reservation-<env>-api --query 'services[0].taskDefinition'` — should match the deploy step's output.
 - If the task definition is right but tasks are still old, check the deployment circuit breaker isn't aborting due to health-check failures.
 
 **Tests pass locally but fail in CI**
 - CI runs against fresh Postgres/Redis service containers — no shared state. If tests depend on data, they're not isolated. Common offender: `Reservation` tests that depend on seeded categories. The CI test job doesn't run `seed_categories`; fix the tests to seed their own fixtures.
+
+---
+
+## 14. Extending the stack
+
+### WebSocket public ALB
+
+The Channels backend can be reached via CloudFront's `/ws/*` path pattern today (same internal ALB origin as `/api/*`), but CloudFront's idle timeout (max 60s, default 4s for some edge configurations) limits long-lived WebSocket connections. For chat / live updates that need stable multi-minute connections, port the `websocket/` layer from the Elated baseline: a separate public ALB on port 8000 with sticky sessions and `/healthz`, fronted by Route 53.
+
+### Hardening the deployer role for prod
+
+`AmazonECS_FullAccess` and `ReadOnlyAccess` are broader than strictly needed. To tighten:
+1. Replace `AmazonECS_FullAccess` with a custom policy scoped to the specific cluster ARN.
+2. Replace `ReadOnlyAccess` with narrow `Describe*`/`List*` on the resource types Terraform actually refreshes for the ecs layer.
+
+Trade-off: every new resource type added to the `ecs` layer downstream needs a corresponding policy update, which is friction. Defer until the layer shape stabilises.
+
+### Media uploads with S3
+
+Already wired — see the [`storage` layer reference](#storage) above for how Django, the SSM parameter, and the task IAM policy fit together. Both stage and prod use private buckets with 6-hour presigned URLs.
 
