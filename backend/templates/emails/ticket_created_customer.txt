@@ -1,0 +1,14 @@
+Hi {{ user_name }},
+
+Thanks for reaching out. We received your support ticket and our team will
+get back to you as soon as possible.
+
+Ticket: #{{ ticket.id }}
+Subject: {{ ticket.subject }}
+Category: {{ ticket.get_category_display }}
+Priority: {{ ticket.get_priority_display }}
+
+You can follow the conversation here:
+{{ ticket_url }}
+
+— BookMe Support

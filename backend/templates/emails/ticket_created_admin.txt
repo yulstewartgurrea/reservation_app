@@ -1,0 +1,14 @@
+A new support ticket was opened.
+
+Ticket: #{{ ticket.id }}
+From: {{ submitter_name }} ({{ ticket.submitter.email }})
+Subject: {{ ticket.subject }}
+Category: {{ ticket.get_category_display }}
+Priority: {{ ticket.get_priority_display }}
+
+{{ ticket.body }}
+
+Open in admin:
+{{ ticket_url }}
+
+— BookMe Support

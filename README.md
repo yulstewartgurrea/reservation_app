@@ -106,7 +106,8 @@ backend/
     admin_panel/         # platform-admin endpoints (overview, pending shops, commission ledger)
     payments/            # Payment model, PayMongo client, checkout, webhook, refund
     locations/           # PSGC master data (region/province/city/barangay) + read-only cascading API
-  templates/emails/      # booking_confirmation/_confirmed/_completed, booking_reminder, verify_email, password_reset (txt+html)
+    support/             # Ticket, TicketMessage, TicketAttachment, TicketEvent audit log; per-user rate limits; multipart file upload
+  templates/emails/      # booking_confirmation/_confirmed/_completed, booking_reminder, verify_email, password_reset, ticket_created_*/ticket_replied/ticket_status_changed (txt+html)
 frontend/
   src/
     app/                 # Next.js App Router pages (mobile-first responsive)
@@ -278,6 +279,19 @@ The shop create ([my-shops/new/page.tsx](frontend/src/app/my-shops/new/page.tsx)
 - `POST commission/invoices/<id>/settle/` — mark paid offline (bank/GCash)
 - `POST commission/invoices/<id>/void/` — void an open invoice
 
+### Support (`/api/support/`)
+Customer/owner-submitted feedback & issue tickets with an audit log. Non-admin querysets are scoped to the requester — non-participants get `404` (never `403`) to prevent enumeration. Admin-only `is_internal=True` messages are filtered at the queryset level. Per-user throttles: `support_ticket_create=10/hour`, `support_message_create=30/hour` (429 with `Retry-After`).
+- `GET tickets/` — list. Non-admin: own tickets only. Admin: all + filters `?status=&category=&priority=&q=&assigned_to=me|unassigned|<id>`
+- `POST tickets/` — create `{category, subject, body, related_reservation?, related_shop?}`. `related_reservation` ownership is validated to prevent enumeration
+- `GET tickets/<id>/` — detail. `messages` is always an array; `events` is `null` for non-admin / populated array for admin (use directly to gate the audit sidebar UI)
+- `PATCH tickets/<id>/` — admin: `status`/`priority`/`assigned_to`. Submitter: `subject`/`body` only while `status="open"`
+- `GET tickets/<id>/messages/` — list thread (non-admin gets internal-filtered)
+- `POST tickets/<id>/messages/` — reply. `multipart/form-data`: `body` (required), `is_internal` (admin only), `attachments` 0–5 files. Per-file: 5 MB max, MIME in `{image/png, image/jpeg, image/webp, application/pdf}`. Stored filename is `tickets/<yyyy>/<mm>/<uuid><ext>` (original name never trusted on disk)
+- `POST tickets/<id>/transition/` — admin only. `{new_status}` — validated against `STATUS_TRANSITIONS` map
+- `POST tickets/<id>/assign/` — admin only. `{assignee_id: <admin id|null>}`. Non-admin assignees rejected
+
+Enums: `category` = `bug|payment|booking|shop|account|feature|other`; `status` = `open|in_progress|awaiting_customer|resolved|closed`; `priority` = `low|normal|high|urgent`. Emails (queued via Celery): `ticket_created_customer`, `ticket_created_admin`, `ticket_replied`, `ticket_status_changed`. A customer reply on `awaiting_customer` auto-transitions to `in_progress` (audited).
+
 ### WebSocket
 - `ws://.../ws/notifications/?token=<jwt>` — auto-joins `user.<id>` group, plus `shop.<id>` for each owned shop. Server pushes `{kind, title, body, payload}` events. Kinds: `booking.*`, `reminder`, `chat.new_message`, `chat.typing`, `presence.update`. Connecting/disconnecting this socket is also what flips a user's online flag (Redis-backed presence with a short reconnect grace period); presence changes fan out to every chat peer.
 - `ws://.../ws/chat/rooms/<id>/?token=<jwt>` — joins `chat.room.<id>`. Server pushes `chat.message`, `chat.message_edited`, `chat.read_state`, and `chat.typing` events for that room. Client can send `{"type": "typing", "is_typing": true|false}` upstream; the server re-broadcasts to the room group and to the other party's `user.<id>` group (so the chat sidebar can react without an open room socket).
@@ -317,6 +331,9 @@ Mobile-first responsive across the board. Role-gated where indicated.
 | `/favorites` | Saved shops |
 | `/chat` | All chats (per-room unread badges, last-message preview) |
 | `/chat/[roomId]` | Conversation view (real-time, edit own messages, mark-unread-from) |
+| `/support` | My tickets (list, status pills, last-activity) |
+| `/support/new` | Open a new ticket (category, subject, body) — 429 surfaced with friendly retry copy |
+| `/support/[id]` | Ticket thread + reply (file upload up to 5 × 5 MB; reply form hidden when ticket is `closed`) |
 
 ### Shop owner
 | Path | Page |
@@ -342,6 +359,8 @@ Mobile-first responsive across the board. Role-gated where indicated.
 | `/admin` | Platform overview |
 | `/admin/pending-shops` | Approve queued shops |
 | `/admin/commission` | Commission ledger + monthly invoices (generate / settle offline / void) |
+| `/admin/tickets` | Support queue (filters: status/category/priority/assignee + free-text). Top-nav badge shows open + assigned-to-me ∪ open + unassigned |
+| `/admin/tickets/[id]` | Manage ticket — transition status (only allowed transitions shown), change priority, assign to me / unassign, internal-note reply, events sidebar (audit log), close-ticket confirmation |
 | `/owner/billing` | Shop owner's monthly commission invoices (pay online / dev-confirm; overdue + auto-pause banner) |
 
 ---
@@ -1033,6 +1052,7 @@ Intentionally not in v1 (see [app_ideas.md §7](app_ideas.md)):
 - PostGIS geospatial migration (current Haversine + bounding box is fine for v1 scale)
 - 2FA, social login (Google)
 - Marking commission entries as settled from the admin UI (data is in `CommissionLedger.settled_at` — admin can flip via Django admin)
+- Support follow-ups: admins-list endpoint + proper assignee dropdown (currently Assign-to-me / Unassign only); customer-side unread indicator (needs `has_unread_admin_reply` flag); shop-owner-scoped ticket views; WebSocket real-time updates on threads
 
 ---
 
