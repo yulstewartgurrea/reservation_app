@@ -277,6 +277,12 @@ LOGGING = {
 
 FRONTEND_URL = env("FRONTEND_URL", default="http://localhost:3000")
 
+# Testing-phase guardrail. While the platform is piloted in a single city,
+# the PSGC dropdowns and shop-form country list are scoped to Iligan only.
+# Set to False (or unset env var to False) to open the locations API and shop
+# forms to all PSGC data and all supported countries.
+LOCATIONS_RESTRICT_TO_ILIGAN = env.bool("LOCATIONS_RESTRICT_TO_ILIGAN", default=True)
+
 DEFAULT_COMMISSION_RATE = env("DEFAULT_COMMISSION_RATE")
 DEFAULT_CANCELLATION_WINDOW_HOURS = env("DEFAULT_CANCELLATION_WINDOW_HOURS")
 STRIKE_LIMIT = env("STRIKE_LIMIT")

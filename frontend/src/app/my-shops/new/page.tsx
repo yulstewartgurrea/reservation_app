@@ -46,20 +46,9 @@ type FormValues = {
 
 const DESCRIPTION_MAX = 500;
 
-const COUNTRIES = [
-  "Philippines",
-  "United States",
-  "United Kingdom",
-  "Singapore",
-  "Japan",
-  "Australia",
-  "Canada",
-  "Hong Kong",
-  "Malaysia",
-  "Indonesia",
-  "Thailand",
-  "Vietnam",
-];
+// Pilot phase: only Philippines is selectable; the backend locations API is
+// also scoped to Iligan (see LOCATIONS_RESTRICT_TO_ILIGAN).
+const COUNTRIES = ["Philippines"];
 
 function empty(): FormValues {
   return {
@@ -73,7 +62,9 @@ function empty(): FormValues {
     city_code: "",
     barangay_code: "",
     postal_code: "",
-    country: "",
+    // Prefilled because the pilot only allows Philippines — keeps the
+    // cascading PSGC dropdowns active without an extra click.
+    country: "Philippines",
     phone: "",
     email: "",
     latitude: "",

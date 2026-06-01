@@ -150,6 +150,7 @@ All in `backend/.env` (mirrors `backend/.env.example`).
 | `CORS_ALLOWED_ORIGINS` | `http://localhost:3000` | Comma-separated origins |
 | `DRF_NUM_PROXIES` | (unset) | Trusted proxy count in front of the app, for IP-based rate limiting on `login`/`register`/`password/reset`. Behind CloudFront→ALB→ECS set this so the throttle keys on the real client IP from `X-Forwarded-For` instead of the proxy's; unset lets DRF use the first XFF entry. |
 | `FRONTEND_URL` | `http://localhost:3000` | Used to build absolute links inside emails |
+| `LOCATIONS_RESTRICT_TO_ILIGAN` | `True` | Pilot guardrail. When on, `/api/locations/*` only returns Iligan City (Lanao Del Norte, Region X) and the shop forms restrict country to Philippines. Flip to `False` to open the platform up. |
 | `DEFAULT_COMMISSION_RATE` | `0.15` | Platform fallback rate; override per-shop with `Shop.commission_rate` (e.g. `0` for an intro period) |
 | `DEFAULT_CANCELLATION_WINDOW_HOURS` | `24` | Hours-before-start cutoff for free cancel |
 | `STRIKE_LIMIT` | `3` | Strikes-in-window before customer is restricted |
@@ -266,6 +267,8 @@ PSGC (Philippine Standard Geographic Code) master data for cascading address dro
 - **public** `GET barangays/?city=<code>` — barangays of that city: `{code, name, city_code}`. `city` is **required** → 400 if missing
 
 Seeded once at `web` startup (`seed_psgc`, idempotent) from `apps/locations/data/psgc_hierarchy.json`: 17 regions, 87 provinces, 1648 cities/municipalities, 42046 barangays. `Shop` carries denormalized `province_code`/`city_code`/`barangay_code` alongside the existing human-readable name fields.
+
+**Pilot restriction (default on).** While `LOCATIONS_RESTRICT_TO_ILIGAN=True` all three endpoints are scoped to Iligan City — `provinces/` returns Lanao Del Norte only, `cities/?province=<anything>` returns Iligan City only, and `barangays/?city=<anything>` returns Iligan's barangays only. The shop new/edit forms also lock the country dropdown to Philippines. Constants live in [apps/locations/constants.py](backend/apps/locations/constants.py); flip the env var to `False` to open the API to the full PSGC dataset and the shop forms to all supported countries.
 
 The shop create ([my-shops/new/page.tsx](frontend/src/app/my-shops/new/page.tsx)) and edit ([my-shops/[id]/edit/_client.tsx](frontend/src/app/my-shops/[id]/edit/_client.tsx)) forms consume these endpoints via the shared [LocationFields.tsx](frontend/src/components/LocationFields.tsx) component as cascading dropdowns (province → city → barangay) **only when Country = Philippines**; other countries fall back to free-text inputs. Each level persists both the PSGC `code` and the display `name`. Lists are cached client-side with TanStack Query (`staleTime: Infinity` — PSGC is static). The source dataset and the build script that produced `psgc_hierarchy.json` live in [data/psgc/](data/psgc/).
 
@@ -629,7 +632,7 @@ Test settings module: [config/test_settings.py](backend/config/test_settings.py)
 | [chat/tests/test_services.py](backend/apps/chat/tests/test_services.py) | get-or-create idempotency, only-customer-can-open + only on active shops, sender must be a participant, edit only your own message, unread arithmetic across rooms, mark-read forward / mark-unread rewind incl. first-message edge case |
 | [chat/tests/test_api.py](backend/apps/chat/tests/test_api.py) | open room (customer-only), list scoped to self, outsiders 404, send / list / edit / mark-read / mark-unread end-to-end, global unread-count, unauthenticated 401 |
 | [chat/tests/test_presence.py](backend/apps/chat/tests/test_presence.py) | presence helpers (`is_online`, bulk `online_user_ids`) against a fake redis, peer fan-out (`peers_to_notify` returns chat-room counterparts), `ChatRoomSerializer.other_party_*` fields, and `ChatRoomConsumer` typing fan-out (room group + recipient's `user.<id>` group) via `WebsocketCommunicator` |
-| [locations/tests/test_locations.py](backend/apps/locations/tests/test_locations.py) | `seed_psgc` counts + FK links (barangay→city→province→region) from a tiny fixture, idempotency skip + `--force` reseed; provinces endpoint shape/region info, cities/barangays require + filter by parent code, missing query param → 400, all three public |
+| [locations/tests/test_locations.py](backend/apps/locations/tests/test_locations.py) | `seed_psgc` counts + FK links (barangay→city→province→region) from a tiny fixture, idempotency skip + `--force` reseed; provinces endpoint shape/region info, cities/barangays require + filter by parent code, missing query param → 400, all three public. Also: `LOCATIONS_RESTRICT_TO_ILIGAN=True` collapses every endpoint to Iligan only (other provinces hidden, cities/barangays empty for non-Iligan parents). |
 
 ---
 
