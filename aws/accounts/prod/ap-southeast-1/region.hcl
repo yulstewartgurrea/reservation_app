@@ -256,14 +256,16 @@ locals {
   # ---------------------------------------------------------------------------
   # ECR
   # ---------------------------------------------------------------------------
-  # Prod uses IMMUTABLE tags so a pushed <sha> can never be silently
-  # overwritten — important for safe rollback via SHA pinning.
+  # MUTABLE so CI can re-push the floating `:latest` tag on every deploy.
+  # SHA tags are still unique per commit in practice (CI tags with the short
+  # SHA), so rollback by SHA remains reliable as long as nothing manually
+  # re-pushes an existing SHA tag.
   # force_delete stays false so accidental `terragrunt destroy` doesn't nuke
   # the image history. To delete the repo, manually empty it first.
   ecr_settings = {
     repositories = {
       "${local.base_image_name}" = {
-        image_tag_mutability = "IMMUTABLE"
+        image_tag_mutability = "MUTABLE"
         force_delete         = false
       }
     }
