@@ -162,11 +162,24 @@ aws/
 │   │       ├── storage/terragrunt.hcl
 │   │       └── frontend_hosting/terragrunt.hcl  # S3 + CloudFront for Next.js static export
 │   │
-│   └── prod/                       #    prod environment (frontend-only for now)
+│   └── prod/                       #    prod environment (live — full stack)
 │       ├── account.hcl
 │       └── ap-southeast-1/
 │           ├── region.hcl
+│           ├── ci/terragrunt.hcl
+│           ├── networking/terragrunt.hcl
+│           ├── ecr/terragrunt.hcl
+│           ├── parameters/
+│           │   ├── env.yaml
+│           │   └── terragrunt.hcl
+│           ├── rds/terragrunt.hcl
+│           ├── redis/terragrunt.hcl
+│           ├── ses/terragrunt.hcl
+│           ├── storage/terragrunt.hcl
+│           ├── ecs/terragrunt.hcl
 │           └── frontend_hosting/terragrunt.hcl
+│           # Note: no `dns/` — the bookme.ph zone is account-global and lives
+│           # under stage. Both envs' frontend_hosting layers write records into it.
 │
 └── layers/                         # ── reusable Terraform modules ──
     ├── dns/                        #    one public Route 53 hosted zone (bookme.ph)
@@ -333,8 +346,13 @@ The biggest layer. Creates:
 - `environment` = plain key/value injected at task start (e.g. `AWS_REGION`)
 - `secrets` = injected at task start by ECS by fetching from SSM/Secrets Manager (e.g. `POSTGRES_PASSWORD`)
 
-The task execution role needs `ssm:GetParameters` on the parameter ARNs. The execution role uses
-the AWS-managed `AmazonSSMReadOnlyAccess` policy by default — broad but functional for stage.
+The task execution role needs `ssm:GetParameters` on the parameter ARNs plus `kms:Decrypt` for
+SecureString values. Both are granted by scoped inline statements in
+[aws/layers/ecs/main.tf](layers/ecs/main.tf) — SSM reads are restricted to
+`/${project}/${env}/*` (so a stage task can't read prod parameters in our shared-account model)
+and KMS Decrypt is gated by a `kms:ViaService = ssm.<region>.amazonaws.com` condition. The
+AWS-managed `AmazonECSTaskExecutionRolePolicy` is still attached for the standard ECR-pull +
+CloudWatch-Logs grants.
 
 ### `storage`
 
@@ -723,9 +741,19 @@ cd ../parameters && terragrunt apply
 aws ecs update-service --cluster ecs-reservation-stage \
   --service svc-ecs-reservation-stage-api --force-new-deployment \
   --profile reservation-stage --region ap-southeast-1
+
+# (5) Frontend must reach the API SAME-ORIGIN. Ensure NEXT_PUBLIC_API_URL is
+#     UNSET in the GitHub env (Settings → Environments → staging/prod) so the
+#     build uses a relative /api base, then redeploy the frontend (push a
+#     frontend/** change). If it was baked with a cross-origin URL (e.g. the
+#     raw *.cloudfront.net host), the app loads on the new domain but every API
+#     call fails with "Network Error" (cross-origin + CORS). See README →
+#     Troubleshooting: "Site loads but API calls return Network Error".
 ```
 
-Verify: `https://staging.bookme.ph` serves the app; `https://dx1epgde94eqq.cloudfront.net` keeps working (it's still an alias and stays in CORS as a fallback).
+Verify: `https://staging.bookme.ph` serves the app **and** "Browse shops" loads data; `https://dx1epgde94eqq.cloudfront.net` keeps working (it's still an alias).
+
+> **Domain-cutover gotcha (we hit this):** a custom domain in front of CloudFront is useless if the SPA was built pointing its API at a *different* host. The frontend is built same-origin (relative `/api`, `wss://<current-host>/ws`) precisely so any domain works with zero per-domain rebuild — see [README → CloudFront single-origin](../README.md) and `frontend/src/lib/api.ts`. Step (5) is the one that bites when adding the prod `bookme.ph` domain later.
 
 **Prod (`bookme.ph` + `www.bookme.ph`)** is wired in code (`frontend_domains` in prod `region.hcl`) but **inert** — prod has only the `frontend_hosting` skeleton; no prod `networking/rds/redis/ecs/ses/parameters` layers exist yet. Standing up the prod backend stack is a separate effort. Once it exists, `cd aws/accounts/prod/ap-southeast-1/frontend_hosting && terragrunt apply` adds the apex/www cert + alias records into the same zone (no second nameserver change — same `bookme.ph` zone). Until then, do **not** apply prod `frontend_hosting` expecting a working site: the static export would load with no API behind it.
 

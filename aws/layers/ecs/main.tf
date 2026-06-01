@@ -195,15 +195,49 @@ module "ecs_service" {
   )
 
   # Task execution role
+  #
+  # We keep ONLY the AWS-managed AmazonECSTaskExecutionRolePolicy (ECR pull +
+  # CloudWatch Logs). The previous default also attached AmazonSSMReadOnlyAccess,
+  # which granted ssm:Get* on EVERY parameter in the account — in our single-
+  # account model that meant a compromised stage task could read prod secrets
+  # (rds_password, PAYMONGO_SECRET_KEY, etc.). It's replaced by the scoped
+  # inline statements below: ssm:GetParameter(s)[ByPath] only on
+  # /${project}/${env}/* and kms:Decrypt only when called via the SSM service
+  # in this region (covers SecureString fetches).
   create_task_exec_iam_role          = true
   task_exec_iam_role_name            = "role-${each.key}-task-exec"
   task_exec_iam_role_use_name_prefix = false
   task_exec_iam_role_description     = "ECS ${each.key} task execution role"
   task_exec_iam_role_policies = try(each.value.task_exec_iam_role_policies, {
     ECS = "arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy"
-    SSM = "arn:aws:iam::aws:policy/AmazonSSMReadOnlyAccess"
   })
-  task_exec_iam_statements = try(each.value.task_exec_iam_statements, [])
+  task_exec_iam_statements = try(each.value.task_exec_iam_statements, [
+    {
+      sid       = "SSMParameterStoreExecRole"
+      actions   = ["ssm:GetParameters", "ssm:GetParameter", "ssm:GetParametersByPath"]
+      resources = ["arn:aws:ssm:${var.aws_region}:${var.account_id}:parameter/${var.project_name}/${var.env}/*"]
+      effect    = "Allow"
+    },
+    {
+      sid     = "KMSDecryptForSSM"
+      actions = ["kms:Decrypt"]
+      # KMS keys can't reliably be enumerated up front (the default
+      # alias/aws/ssm key has a per-account, per-region key id we don't pin
+      # here), so resources stays "*". The kms:ViaService condition makes
+      # this safe: decrypt only succeeds when the request comes through the
+      # SSM service in this region — i.e. the task-start secret injection
+      # path. Standard AWS recommendation for SecureString fetches.
+      resources = ["*"]
+      effect    = "Allow"
+      condition = [
+        {
+          test     = "StringEquals"
+          variable = "kms:ViaService"
+          values   = ["ssm.${var.aws_region}.amazonaws.com"]
+        }
+      ]
+    },
+  ])
 
   # Task role
   create_tasks_iam_role          = true
