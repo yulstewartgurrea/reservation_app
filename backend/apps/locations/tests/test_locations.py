@@ -1,10 +1,15 @@
 import json
 from unittest import mock
 
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from rest_framework.test import APITestCase
 
 from apps.locations import services
+from apps.locations.constants import (
+    ILIGAN_CITY_CODE,
+    ILIGAN_PROVINCE_CODE,
+    ILIGAN_REGION_CODE,
+)
 from apps.locations.models import Barangay, CityMunicipality, Province, Region
 from apps.locations.services import seed_psgc
 
@@ -117,6 +122,9 @@ class SeedPsgcTests(TestCase):
         self.assertEqual(Region.objects.count(), 2)
 
 
+# The Iligan-only pilot restriction is on by default. These tests assert the
+# unrestricted behavior, so they explicitly turn the flag off.
+@override_settings(LOCATIONS_RESTRICT_TO_ILIGAN=False)
 class LocationApiTests(APITestCase):
     @classmethod
     def setUpTestData(cls):
@@ -185,3 +193,115 @@ class LocationApiTests(APITestCase):
         self.assertEqual(
             self.client.get("/api/locations/barangays/?city=012801000").status_code, 200
         )
+
+
+# Fixture that includes both Iligan (the testing area) and an off-platform
+# province so we can verify the filter excludes everything else.
+ILIGAN_FIXTURE = [
+    {
+        "code": ILIGAN_REGION_CODE,
+        "name": "Northern Mindanao",
+        "regionName": "Region X",
+        "islandGroup": "mindanao",
+        "provinces": [
+            {
+                "code": ILIGAN_PROVINCE_CODE,
+                "name": "Lanao Del Norte",
+                "type": "province",
+                "cities_municipalities": [
+                    {
+                        "code": ILIGAN_CITY_CODE,
+                        "name": "City of Iligan",
+                        "type": "city",
+                        "isCapital": False,
+                        "barangays": [
+                            {"code": "103504001", "name": "Abuno", "type": "barangay"},
+                            {"code": "103504002", "name": "Bonbonon", "type": "barangay"},
+                        ],
+                    },
+                    {
+                        "code": "103505000",
+                        "name": "Kapatagan",
+                        "type": "municipality",
+                        "isCapital": False,
+                        "barangays": [
+                            {"code": "103505001", "name": "Bansarvil 1", "type": "barangay"},
+                        ],
+                    },
+                ],
+            }
+        ],
+    },
+    {
+        "code": "010000000",
+        "name": "Ilocos Region",
+        "regionName": "Region I",
+        "islandGroup": "luzon",
+        "provinces": [
+            {
+                "code": "012800000",
+                "name": "Ilocos Norte",
+                "type": "province",
+                "cities_municipalities": [
+                    {
+                        "code": "012801000",
+                        "name": "Adams",
+                        "type": "municipality",
+                        "isCapital": False,
+                        "barangays": [
+                            {"code": "012801001", "name": "Adams (Pob.)", "type": "barangay"},
+                        ],
+                    },
+                ],
+            }
+        ],
+    },
+]
+
+
+@override_settings(LOCATIONS_RESTRICT_TO_ILIGAN=True)
+class IliganRestrictedApiTests(APITestCase):
+    """During the pilot the cascading endpoints must only surface Iligan."""
+
+    @classmethod
+    def setUpTestData(cls):
+        with mock.patch.object(services, "_load_hierarchy", return_value=ILIGAN_FIXTURE):
+            seed_psgc()
+
+    def test_provinces_returns_only_lanao_del_norte(self):
+        resp = self.client.get("/api/locations/provinces/")
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["code"], ILIGAN_PROVINCE_CODE)
+        self.assertEqual(data[0]["name"], "Lanao Del Norte")
+
+    def test_cities_returns_only_iligan_for_lanao_del_norte(self):
+        resp = self.client.get(
+            f"/api/locations/cities/?province={ILIGAN_PROVINCE_CODE}"
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data), 1)
+        self.assertEqual(data[0]["code"], ILIGAN_CITY_CODE)
+        self.assertEqual(data[0]["name"], "City of Iligan")
+
+    def test_cities_is_empty_for_any_other_province(self):
+        # Even if a caller asks for Ilocos Norte the result set is collapsed.
+        resp = self.client.get("/api/locations/cities/?province=012800000")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), [])
+
+    def test_barangays_returns_only_iligan_barangays(self):
+        resp = self.client.get(
+            f"/api/locations/barangays/?city={ILIGAN_CITY_CODE}"
+        )
+        self.assertEqual(resp.status_code, 200)
+        data = resp.json()
+        self.assertEqual(len(data), 2)
+        self.assertEqual({b["name"] for b in data}, {"Abuno", "Bonbonon"})
+
+    def test_barangays_is_empty_for_any_other_city(self):
+        resp = self.client.get("/api/locations/barangays/?city=012801000")
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.json(), [])
