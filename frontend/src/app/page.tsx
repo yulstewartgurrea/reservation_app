@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { MapPin, Search, Star } from "lucide-react";
@@ -132,10 +132,6 @@ export default function HomePage() {
   const [serviceQuery, setServiceQuery] = useState("");
   const [bookingDate, setBookingDate] = useState("");
 
-  const serviceInputRef = useRef<HTMLInputElement>(null);
-  const dateInputRef = useRef<HTMLInputElement>(null);
-  const heroSearchRef = useRef<HTMLFormElement>(null);
-
   // Live data — categories, top Iligan shops, top Iligan services.
   const [categories, setCategories] = useState<Category[]>([]);
   const [categoriesLoading, setCategoriesLoading] = useState(true);
@@ -198,68 +194,17 @@ export default function HomePage() {
     };
   }, []);
 
-  const targetHref = useMemo(
-    () => buildShopsHref({ city: BETA_CITY_NAME, q: serviceQuery, bookingDate }),
-    [serviceQuery, bookingDate]
-  );
-
   function handleHeroSubmit(e: React.FormEvent) {
     e.preventDefault();
-    router.push(targetHref);
-  }
-
-  function focusHeroField(field: "service" | "date") {
-    heroSearchRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
-    setTimeout(() => {
-      if (field === "service") serviceInputRef.current?.focus();
-      else dateInputRef.current?.focus();
-    }, 250);
+    router.push(
+      buildShopsHref({ city: BETA_CITY_NAME, q: serviceQuery, bookingDate })
+    );
   }
 
   const minDate = todayIso();
 
   return (
     <div className="space-y-10 pb-12">
-      {/* STICKY TOP BAR — mirrors hero state, clicking submits the same search. */}
-      <section className="sticky top-3 z-20 rounded-full border border-slate-200 bg-white/95 px-3 py-2 shadow-sm backdrop-blur">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex min-w-0 flex-1 items-center gap-2 rounded-full border border-slate-200 px-2 py-1 shadow-sm">
-            <span
-              className="inline-flex min-w-0 items-center gap-1 truncate rounded-full px-3 py-1.5 text-sm font-semibold text-slate-800"
-              title="Beta scope — Iligan City only"
-            >
-              <MapPin size={12} className="shrink-0 text-brand-600" />
-              {BETA_CITY_LABEL}
-            </span>
-            <span className="h-4 w-px shrink-0 bg-slate-200" />
-            <button
-              type="button"
-              onClick={() => focusHeroField("service")}
-              className="min-w-0 truncate rounded-full px-3 py-1.5 text-sm font-semibold text-slate-800 hover:bg-slate-50"
-            >
-              {serviceQuery || "Any service"}
-            </button>
-            <span className="h-4 w-px shrink-0 bg-slate-200" />
-            <button
-              type="button"
-              onClick={() => focusHeroField("date")}
-              className={`min-w-0 truncate rounded-full px-3 py-1.5 text-sm hover:bg-slate-50 ${
-                bookingDate ? "font-semibold text-slate-800" : "text-slate-500"
-              }`}
-            >
-              {bookingDate || "Add date"}
-            </button>
-          </div>
-          <Link
-            href={targetHref}
-            className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-brand-600 text-white transition hover:bg-brand-700"
-            aria-label="Search shops"
-          >
-            <Search size={18} />
-          </Link>
-        </div>
-      </section>
-
       {/* HERO — primary search form. */}
       <section className="overflow-hidden rounded-3xl bg-gradient-to-r from-brand-700 via-brand-600 to-brand-500 px-6 py-12 text-white sm:px-10 sm:py-16">
         <p className="text-xs font-semibold uppercase tracking-[0.25em] text-brand-100">BookMe</p>
@@ -271,7 +216,6 @@ export default function HomePage() {
         </p>
 
         <form
-          ref={heroSearchRef}
           onSubmit={handleHeroSubmit}
           className="mt-8 grid gap-3 rounded-2xl bg-white p-3 text-slate-900 shadow-2xl sm:grid-cols-[1.3fr_1fr_1fr_auto]"
         >
@@ -293,7 +237,6 @@ export default function HomePage() {
               Service
             </span>
             <input
-              ref={serviceInputRef}
               value={serviceQuery}
               onChange={(e) => setServiceQuery(e.target.value)}
               type="text"
@@ -308,7 +251,6 @@ export default function HomePage() {
               When
             </span>
             <input
-              ref={dateInputRef}
               type="date"
               value={bookingDate}
               min={minDate}
