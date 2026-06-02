@@ -10,6 +10,15 @@ locals {
   sub_environments = [for e in var.github_environments : "repo:${var.github_repo}:environment:${e}"]
   sub_branches     = [for b in var.github_branches : "repo:${var.github_repo}:ref:refs/heads/${b}"]
   allowed_subs     = concat(local.sub_environments, local.sub_branches)
+
+  # task_role_names contains both "-task" and "-task-exec" role names. The ECS
+  # module creates a customer-managed inline policy for each task-exec role,
+  # named identically to the role (policy/role-<svc>-task-exec). Terraform
+  # needs to edit those policies + their role attachments on every apply that
+  # changes task_exec_iam_statements (e.g. scoped SSM/KMS perms).
+  task_exec_role_names  = [for n in var.task_role_names : n if endswith(n, "-task-exec")]
+  task_exec_role_arns   = [for n in local.task_exec_role_names : "arn:aws:iam::${local.account_id}:role/${n}"]
+  task_exec_policy_arns = [for n in local.task_exec_role_names : "arn:aws:iam::${local.account_id}:policy/${n}"]
 }
 
 ################################################################################
@@ -147,6 +156,32 @@ data "aws_iam_policy_document" "deployer_inline" {
     resources = [
       for name in var.task_role_names : "arn:aws:iam::${local.account_id}:role/${name}"
     ]
+  }
+
+  # Edit the customer-managed task_exec policies in place when
+  # task_exec_iam_statements changes (e.g. when scoped SSM/KMS perms are
+  # added). Scoped to the policies whose names match our task-exec roles.
+  statement {
+    sid = "IamManageTaskExecPolicies"
+    actions = [
+      "iam:CreatePolicyVersion",
+      "iam:DeletePolicyVersion",
+      "iam:ListPolicyVersions",
+      "iam:SetDefaultPolicyVersion",
+    ]
+    resources = local.task_exec_policy_arns
+  }
+
+  # Attach/detach managed policies on the task-exec roles. Needed when
+  # task_exec_iam_role_policies changes (e.g. dropping AmazonSSMReadOnlyAccess
+  # in favour of inline statements).
+  statement {
+    sid = "IamManageTaskExecRoleAttachments"
+    actions = [
+      "iam:AttachRolePolicy",
+      "iam:DetachRolePolicy",
+    ]
+    resources = local.task_exec_role_arns
   }
 }
 
