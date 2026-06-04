@@ -11,3 +11,13 @@ output "name_servers" {
   description = "Set THESE four name servers on the domain in the dot.ph dashboard (Manage -> bookme.ph -> Nameservers), replacing dot.ph's defaults."
   value       = aws_route53_zone.root.name_servers
 }
+
+output "ses_domain_identity_arn" {
+  description = "ARN of the account-wide SES domain identity for the root domain. Both envs' SES layers send AS this identity."
+  value       = aws_sesv2_email_identity.root_domain.arn
+}
+
+output "ses_domain_identity_name" {
+  description = "Email identity name (the bare domain). Use as the value of SES SendingAuthorizationIdentity if you ever scope per-env policies."
+  value       = aws_sesv2_email_identity.root_domain.email_identity
+}
