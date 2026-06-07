@@ -1,18 +1,25 @@
 # SES configuration for transactional email (signup OTPs, password resets,
 # booking confirmations, maintenance reminders).
 #
-# What this layer creates:
-#   - SES email identity for the sender address (required while not on a verified domain)
+# What this layer creates (PER-ENV):
+#   - SES email identity for the sender address (kept while in sandbox so the
+#     verification link to noreply@bookme.ph isn't required; harmless once the
+#     account is out of sandbox and the domain identity is verified)
 #   - Optional extra recipient identities (sandbox mode only sends to verified addresses)
-#   - IAM user with ses:SendRawEmail permission
+#   - IAM user with ses:SendEmail / ses:SendRawEmail permission
 #   - IAM access key (provides the SES SMTP password via the v4 derivation)
 #   - Optional SSM parameters under /<project>/<env>/ses/* so ECS can read the creds
 #
+# What this layer does NOT create:
+#   - The account-wide SES *domain* identity for bookme.ph and its DKIM /
+#     DMARC Route 53 records. Those live in the `dns` layer (stage-only) so a
+#     single shared identity serves both envs. See aws/layers/dns/main.tf.
+#
 # Going to production:
-#   1. Run `aws ses put-account-details` or use the SES console "Request production access"
-#      so the account leaves sandbox.
-#   2. Verify a domain (separate add-on; needs Route53 DKIM CNAMEs) and remove the
-#      per-recipient verifications below.
+#   - Use the SES console "Request production access" to leave sandbox (200
+#     sends/day, verified-recipients-only). This is a support ticket — no
+#     Terraform path. The dns layer's domain identity + DKIM + DMARC must be
+#     applied first (and DKIM status Successful) before AWS will approve.
 
 data "aws_region" "current" {}
 

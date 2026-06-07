@@ -19,4 +19,16 @@ locals {
   # After applying the dns layer, copy its `name_servers` output into the
   # dot.ph dashboard (Manage -> bookme.ph -> Nameservers).
   root_domain = "bookme.ph"
+
+  # Resend email-sending DNS for bookme.ph (account-global, like the SES domain
+  # identity). Values pasted verbatim from the Resend Domains page (region:
+  # Tokyo / ap-northeast-1). See layers/dns/variables.tf for field meanings.
+  # After editing, re-apply the `dns` layer: cd accounts/stage/ap-southeast-1/dns
+  # && terragrunt apply. Resend's poller flips the domain to Verified within
+  # minutes once these resolve.
+  resend_verify_records = [
+    { name = "send.bookme.ph", type = "MX", value = "feedback-smtp.ap-northeast-1.amazonses.com", priority = 10 },
+    { name = "send.bookme.ph", type = "TXT", value = "v=spf1 include:amazonses.com ~all", priority = null },
+    { name = "resend._domainkey.bookme.ph", type = "TXT", value = "p=MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQC/OnoteCX+lOJ80ctyEhbvRWCVwz2bhbEYXgi+SDygbQV5f+GTIWjWNsMgDI7JnBMI2R8G7au1x8e3NCW8Ns8GmmZLpzycpXau1MtvjhhXu+21zPAvxy6RgZNODRdjTuBEeCZ6O9oy8iPrlXXtuzTB6rTiQDTgwJ3wvkmsTYOXsQIDAQAB", priority = null },
+  ]
 }

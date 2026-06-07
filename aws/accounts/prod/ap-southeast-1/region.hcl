@@ -151,6 +151,13 @@ locals {
     { name = "EMAIL_USE_TLS", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/email_use_tls" },
     { name = "DEFAULT_FROM_EMAIL", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/default_from_email" },
 
+    # Resend — only read when EMAIL_BACKEND above is flipped to the anymail Resend
+    # backend (see parameters/env.yaml). Wired in now so the switch is value-only.
+    # Created as SecureString placeholders by the `parameters` layer — apply it
+    # before re-applying ecs after a fresh checkout, same as the ses params.
+    { name = "RESEND_API_KEY", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/RESEND_API_KEY" },
+    { name = "RESEND_SIGNING_SECRET", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/RESEND_SIGNING_SECRET" },
+
     { name = "PAYMONGO_SECRET_KEY", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/PAYMONGO_SECRET_KEY" },
     { name = "PAYMONGO_PUBLIC_KEY", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/PAYMONGO_PUBLIC_KEY" },
     { name = "PAYMONGO_WEBHOOK_SECRET", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/PAYMONGO_WEBHOOK_SECRET" },
@@ -286,11 +293,11 @@ locals {
   db_allowed_cidrs        = []
 
   rds_settings = {
-    name                                  = "rds-${local.project_name}-${local.env}"
-    engine                                = "postgres"
-    engine_version                        = "17.4"
-    family                                = "postgres17"
-    major_engine_version                  = "17"
+    name                 = "rds-${local.project_name}-${local.env}"
+    engine               = "postgres"
+    engine_version       = "17.4"
+    family               = "postgres17"
+    major_engine_version = "17"
     # Minimum prod-grade: db.t4g.small (2 vCPU burst, 2 GB RAM) + Multi-AZ.
     # Multi-AZ doubles cost (~$26/mo) but gives sub-60s failover.
     instance_class                        = "db.t4g.small"
@@ -312,8 +319,8 @@ locals {
     # Prod safety: deletion_protection prevents accidental drops. To destroy
     # this RDS, you MUST first set deletion_protection = false and apply once,
     # THEN run destroy. Two-step gate is intentional.
-    deletion_protection                   = true
-    storage_encrypted                     = true
+    deletion_protection = true
+    storage_encrypted   = true
   }
 
   # ---------------------------------------------------------------------------
@@ -321,13 +328,13 @@ locals {
   # ---------------------------------------------------------------------------
   create_redis = true
   redis_settings = {
-    name                       = "redis-${local.project_name}-${local.env}"
-    engine                     = "redis"
-    engine_version             = "7.1"
+    name           = "redis-${local.project_name}-${local.env}"
+    engine         = "redis"
+    engine_version = "7.1"
     # cache.t3.small (2 vCPU burst, 1.55 GB RAM) — smallest size that still
     # supports automatic_failover_enabled.
-    node_type                  = "cache.t3.small"
-    cluster_mode_enabled       = false
+    node_type            = "cache.t3.small"
+    cluster_mode_enabled = false
     # Two nodes (primary + replica) = automatic failover. Stage runs 1 node;
     # prod runs 2 across AZs so a single-AZ outage doesn't kill Channels/Celery.
     num_cache_clusters         = 2

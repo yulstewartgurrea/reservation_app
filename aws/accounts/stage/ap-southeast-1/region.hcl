@@ -139,6 +139,13 @@ locals {
     { name = "EMAIL_USE_TLS", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/email_use_tls" },
     { name = "DEFAULT_FROM_EMAIL", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/ses/default_from_email" },
 
+    # Resend — only read when EMAIL_BACKEND above is flipped to the anymail Resend
+    # backend (see parameters/env.yaml). Wired in now so the switch is value-only.
+    # Created as SecureString placeholders by the `parameters` layer — apply it
+    # before re-applying ecs after a fresh checkout, same as the ses params.
+    { name = "RESEND_API_KEY", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/RESEND_API_KEY" },
+    { name = "RESEND_SIGNING_SECRET", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/RESEND_SIGNING_SECRET" },
+
     { name = "PAYMONGO_SECRET_KEY", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/PAYMONGO_SECRET_KEY" },
     { name = "PAYMONGO_PUBLIC_KEY", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/PAYMONGO_PUBLIC_KEY" },
     { name = "PAYMONGO_WEBHOOK_SECRET", valueFrom = "arn:aws:ssm:${local.aws_region}:${local.account_id}:parameter/${local.project_name}/${local.env}/PAYMONGO_WEBHOOK_SECRET" },
@@ -265,7 +272,7 @@ locals {
   # Find your current public IP with:  curl -s https://checkip.amazonaws.com
   # If your ISP rotates your IP you must update this and re-apply the rds layer.
   rds_publicly_accessible = true
-  db_allowed_cidrs        = [
+  db_allowed_cidrs = [
     "49.146.43.174/32",  # Yul
     "49.144.236.108/32", # Kevin
   ]
