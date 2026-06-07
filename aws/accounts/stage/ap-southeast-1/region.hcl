@@ -272,7 +272,7 @@ locals {
   # Find your current public IP with:  curl -s https://checkip.amazonaws.com
   # If your ISP rotates your IP you must update this and re-apply the rds layer.
   rds_publicly_accessible = true
-  db_allowed_cidrs        = [
+  db_allowed_cidrs = [
     "49.146.43.174/32",  # Yul
     "49.144.236.108/32", # Kevin
   ]

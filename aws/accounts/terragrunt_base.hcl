@@ -15,7 +15,7 @@ locals {
 
   # In CI we authenticate via OIDC (env-var credentials), not a named profile.
   # Local dev uses ~/.aws/credentials with the profile_name from account.hcl.
-  in_ci         = get_env("CI", "") != ""
+  in_ci            = get_env("CI", "") != ""
   resolved_profile = local.in_ci ? null : try(local.account_vars.profile_name, null)
 }
 
@@ -50,9 +50,9 @@ remote_state {
     # policies are configured once during setup (via the admin profile locally).
     # CI deploy roles only have state read/write perms, so don't try to re-enforce
     # these every run.
-    skip_bucket_ssencryption  = true
-    skip_bucket_root_access   = true
-    skip_bucket_enforced_tls  = true
+    skip_bucket_ssencryption = true
+    skip_bucket_root_access  = true
+    skip_bucket_enforced_tls = true
   }
   generate = {
     path      = "_backend.tf"
@@ -71,12 +71,12 @@ inputs = merge(
   local.in_ci ? { profile_name = "" } : {},
   {
     common_tags = {
-      project         = local.region_vars.project_name
-      environment     = local.env
+      project          = local.region_vars.project_name
+      environment      = local.env
       environment-type = local.env_type
-      created-by      = "terraform"
-      managed-by      = "terraform"
-      layer           = local.layer
+      created-by       = "terraform"
+      managed-by       = "terraform"
+      layer            = local.layer
     }
   }
 )
