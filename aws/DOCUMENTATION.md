@@ -571,6 +571,14 @@ DKIM verification is independent of SES sandbox — you still need a separate AW
    ```
    Revert by setting `email_backend` back to `django.core.mail.backends.smtp.EmailBackend`. App-side details (the `tracking`-signal handler and `User.email_bounced` suppression) are in the main [README](../README.md) Email section.
 
+**Gotchas learned wiring this up (read before doing prod):**
+
+- **The flip must outlive `terragrunt apply`.** `email_backend` and `default_from_email` are seeded by the `ses` layer. They carry `lifecycle.ignore_changes = [value]` (layers/ses/main.tf) precisely so a later `ses` apply doesn't silently reset `email_backend` back to the SMTP backend — which it did once, and staging started bouncing every send with an SES `554 ... not verified` sandbox error. After flipping, `aws ssm get-parameter --name /…/ses/email_backend` should read `anymail.backends.resend.EmailBackend`; if it ever reverts to SMTP, that's the symptom.
+- **Apply `parameters` BEFORE the deploy.** CI (`backend-deploy.yml`) only applies the **ecs** layer — not `parameters` or `ses`. The ecs task def references `RESEND_API_KEY`/`RESEND_SIGNING_SECRET`, so those SSM params must already exist or the new tasks fail to start (`ResourceInitializationError`). Run the `parameters` layer apply first.
+- **The image must contain `anymail` before you flip.** Flipping `email_backend` to the Resend backend on an image built before the Resend commit throws `ModuleNotFoundError: anymail` (caught by `send_template_email`, so mail silently stops). Deploy the branch (staging←→`staging`, prod←→`main`) first, confirm the rollout is `COMPLETED`, then flip.
+
+**Prod specifics.** Prod reuses the **same verified `bookme.ph`** domain (DNS is account-global — already done by the stage `dns` layer), and prod's `default_from_email` is already `noreply@bookme.ph`, so prod only needs: apply `prod/parameters` → set `RESEND_API_KEY` → deploy `main` → flip `prod/ses/email_backend` → add a **separate** prod webhook at `https://bookme.ph/api/email/webhooks/resend/tracking/` and set `prod/RESEND_SIGNING_SECRET`. Moving prod to Resend also sidesteps SES production-access (sandbox) entirely.
+
 ### `frontend_hosting`
 
 **Creates** — S3 bucket (private, OAC-locked) + CloudFront distribution + GitHub OIDC provider + per-env deploy IAM role. When `frontend_domains` is set **and** the `dns` zone id is available, it also creates a us-east-1 ACM cert (DNS-validated) and apex/subdomain alias A+AAAA records.
