@@ -120,6 +120,14 @@ resource "aws_ssm_parameter" "default_from_email" {
   type      = "String"
   value     = local.default_from
   overwrite = true
+
+  # Seed a default, then leave the live value alone — when sending switches to
+  # Resend the From address becomes noreply@bookme.ph, set out-of-band via
+  # `aws ssm put-parameter`. Same seed-then-override pattern as the parameters
+  # layer's secrets; without this, every apply would revert the Resend flip.
+  lifecycle {
+    ignore_changes = [value]
+  }
 }
 
 resource "aws_ssm_parameter" "email_backend" {
@@ -128,6 +136,16 @@ resource "aws_ssm_parameter" "email_backend" {
   type      = "String"
   value     = "django.core.mail.backends.smtp.EmailBackend"
   overwrite = true
+
+  # Seed the SES SMTP backend, then leave the live value alone. To switch a
+  # given env to Resend, set this out-of-band:
+  #   aws ssm put-parameter --overwrite --name /<project>/<env>/ses/email_backend \
+  #     --type String --value anymail.backends.resend.EmailBackend
+  # ignore_changes keeps a later `terragrunt apply` of this layer from silently
+  # reverting that flip back to SMTP (the bug that took staging down once).
+  lifecycle {
+    ignore_changes = [value]
+  }
 }
 
 resource "aws_ssm_parameter" "email_use_tls" {
