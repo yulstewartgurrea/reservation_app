@@ -52,6 +52,9 @@ INSTALLED_APPS = [
 ]
 
 MIDDLEWARE = [
+    # First, so the ALB health probe (by raw task IP) is answered before host
+    # validation — lets ALLOWED_HOSTS stay restrictive. See apps/core/middleware.
+    "apps.core.middleware.HealthCheckMiddleware",
     "corsheaders.middleware.CorsMiddleware",
     "django.middleware.security.SecurityMiddleware",
     "django.contrib.sessions.middleware.SessionMiddleware",
