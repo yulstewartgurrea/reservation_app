@@ -157,8 +157,10 @@ All in `backend/.env` (mirrors `backend/.env.example`).
 | `STRIKE_WINDOW_DAYS` | `90` | Rolling window for strikes |
 | `COMMISSION_INVOICE_DUE_DAYS` | `7` | Days from monthly invoice issue until it's due |
 | `COMMISSION_INVOICE_GRACE_DAYS` | `7` | Grace after due date; then the shop's new bookings auto-pause until paid |
-| `EMAIL_BACKEND` | `console` | `django.core.mail.backends.smtp.EmailBackend` for prod |
-| `EMAIL_HOST` / `EMAIL_PORT` / `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` / `EMAIL_USE_TLS` | — | SMTP config when not console |
+| `EMAIL_BACKEND` | `console` | Sender backend. Three prod recipes (mutually exclusive) in `backend/.env.example`: Gmail/SES SMTP (`…smtp.EmailBackend`) or Resend (`anymail.backends.resend.EmailBackend`) |
+| `EMAIL_HOST` / `EMAIL_PORT` / `EMAIL_HOST_USER` / `EMAIL_HOST_PASSWORD` / `EMAIL_USE_TLS` | — | SMTP config (Gmail/SES recipes only; unused with Resend) |
+| `RESEND_API_KEY` | "" | Resend API key — only read when `EMAIL_BACKEND` is the Resend backend |
+| `RESEND_SIGNING_SECRET` | "" | Svix signing secret for the Resend bounce/complaint webhook (`/api/email/webhooks/resend/tracking/`) |
 | `DEFAULT_FROM_EMAIL` | `Reserva <noreply@reserva.local>` | "From:" header |
 | `PAYMONGO_SECRET_KEY` | "" | PayMongo secret (sk_test_… or sk_live_…). Empty enables dev-fake mode. |
 | `PAYMONGO_PUBLIC_KEY` | "" | PayMongo publishable key |
@@ -487,7 +489,8 @@ Below: each feature with where it lives in the code.
 
 **Already done in code:**
 - HTML + text templates in [backend/templates/emails/](backend/templates/emails/): `booking_confirmation`, `booking_confirmed`, `booking_completed`, `booking_reminder`, `owner_reminder`, `verify_email`, `password_reset`, `email_otp`, `maintenance_reminder`, `commission_invoice_issued`, `commission_invoice_paid`, `commission_invoice_overdue`
-- Single helper: [apps/core/emails.py](backend/apps/core/emails.py) `send_template_email` (multipart MIME, never raises)
+- Single helper: [apps/core/emails.py](backend/apps/core/emails.py) `send_template_email` (multipart MIME, never raises). Provider-agnostic — the active sender is chosen by `EMAIL_BACKEND` (console / SMTP / Resend), so call sites never change when the provider does.
+- Delivery-event suppression: when the provider (Resend, via [django-anymail](https://anymail.dev)) reports a hard bounce or spam complaint, Anymail's signed webhook (`/api/email/webhooks/resend/tracking/`) fires its `tracking` signal; [apps/core/email_events.py](backend/apps/core/email_events.py) flags the matching `User.email_bounced`, and `send_template_email` then skips that address. This protects sender reputation by never re-mailing dead/complaining addresses. SES SMTP remains a supported fallback (no webhook events).
 - Account flow helpers: [apps/accounts/emails.py](backend/apps/accounts/emails.py) → `send_otp_email`, `send_verification_email`, `send_password_reset_email`
 - Celery tasks:
   - `send_booking_confirmation_email` (signal-driven on create — "booking requested")

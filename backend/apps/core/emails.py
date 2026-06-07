@@ -21,6 +21,28 @@ def get_frontend_url() -> str:
     return getattr(settings, "FRONTEND_URL", "http://localhost:3000")
 
 
+def _drop_suppressed(recipients: list[str]) -> list[str]:
+    """Remove addresses flagged as bounced/complained (see apps.core.email_events).
+
+    Only addresses that map to a flagged User are dropped; unknown addresses
+    (ops/admin recipients with no User row) always pass through. Imported lazily
+    via get_user_model so this module stays importable during app loading.
+    """
+    from django.contrib.auth import get_user_model
+
+    User = get_user_model()
+    suppressed = set(
+        User.objects.filter(email__in=recipients, email_bounced=True).values_list(
+            "email", flat=True
+        )
+    )
+    if not suppressed:
+        return recipients
+    kept = [r for r in recipients if r not in suppressed]
+    logger.info("send_template_email suppressed=%s", sorted(suppressed))
+    return kept
+
+
 def send_template_email(
     *,
     to: str | Iterable[str],
@@ -35,6 +57,10 @@ def send_template_email(
     Never raises — callers shouldn't have to wrap this.
     """
     recipients = [to] if isinstance(to, str) else list(to)
+    recipients = _drop_suppressed(recipients)
+    if not recipients:
+        logger.info("send_template_email skipped (all recipients suppressed) subject=%r", subject)
+        return False
     try:
         text_body = render_to_string(text_template, context)
         html_body = render_to_string(html_template, context)

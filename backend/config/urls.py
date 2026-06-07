@@ -28,6 +28,12 @@ urlpatterns = [
     path("api/locations/", include("apps.locations.urls")),
     path("api/support/", include("apps.support.urls")),
 
+    # Inbound email delivery events (Resend, via Anymail). Anymail's view verifies
+    # the provider signature and fires the `tracking` signal handled in
+    # apps.core.email_events. Resend's endpoint resolves to:
+    #   /api/email/webhooks/resend/tracking/
+    path("api/email/webhooks/", include("anymail.urls")),
+
     path("api/schema/", SpectacularAPIView.as_view(), name="schema"),
     path("api/docs/", SpectacularSwaggerView.as_view(url_name="schema"), name="swagger-ui"),
 ]

@@ -401,9 +401,10 @@ change because `S3Storage` can be subclassed to swap the URL host.
 
 ### `ses`
 
-**Creates** — verified SES email identity for the sender, IAM user with `ses:SendEmail` /
-`ses:SendRawEmail`, an IAM access key, and (when `write_smtp_creds_to_ssm = true`) seven SSM
-parameters under `/<project>/<env>/ses/*` that the ECS task reads as the `EMAIL_*` env vars:
+**Creates (per env)** — verified SES *email* identity for the sender, IAM user with
+`ses:SendEmail` / `ses:SendRawEmail`, an IAM access key, and (when
+`write_smtp_creds_to_ssm = true`) seven SSM parameters under `/<project>/<env>/ses/*` that the
+ECS task reads as the `EMAIL_*` env vars:
 
 | SSM path | ECS env var | Purpose |
 |---|---|---|
@@ -418,10 +419,83 @@ parameters under `/<project>/<env>/ses/*` that the ECS task reads as the `EMAIL_
 The v4 password derivation is handled by the AWS provider via
 `aws_iam_access_key.smtp.ses_smtp_password_v4` — no manual HMAC scripting required.
 
-**Sandbox vs production.** SES accounts start in sandbox: 200 sends/day, recipients must also be
-verified. Add test recipients via `additional_verified_emails` in `region.hcl`. Click the
-verification link AWS emails to each address. Request production access in the SES console when
-ready.
+**Domain identity lives in `dns`, not here.** SES allows only one identity per (account, domain)
+and both envs share one AWS account, so the `bookme.ph` domain identity + its DKIM CNAMEs +
+DMARC TXT are managed by the `dns` layer (see § `dns` below). Both envs' `ses` layers send
+*as* that shared identity (default From: `noreply@bookme.ph`). The per-env `aws_ses_email_identity`
+resource is still kept here for legacy reasons (lets you fall back to address-level verification
+if the domain identity is ever removed); it's harmless once the domain identity is verified.
+
+**Sandbox vs production.** SES accounts start in sandbox: 200 sends/day, 1 msg/sec, recipients
+must also be verified. Add test recipients via `additional_verified_emails` in `region.hcl`.
+Click the verification link AWS emails to each address. **Request production access** when ready —
+this is an AWS support ticket, no Terraform path. Approval is typically 24–48h. AWS expects DKIM
+(`Successful`) and DMARC published before approving, so apply the `dns` layer first.
+
+#### Going to production — runbook (staging + prod)
+
+> **One account, one request.** Production access is a property of the **account + region**, not
+> an environment. Stage and prod share the same AWS account (`936146782254`, `ap-southeast-1`), so a
+> **single** production-access request lifts **both** out of sandbox at once. There is no separate
+> "prod request" later. The only genuinely per-env step is each env's `ses` layer (its own SMTP
+> IAM user + creds).
+
+Prerequisites (done once, in the stage `dns` layer): `bookme.ph` domain identity created, DKIM
+status `SUCCESS`, DMARC published.
+
+1. **Apply the SES layer for each env** — creates the per-env SMTP IAM user + the `/ses/*` SSM
+   creds the ECS task reads. Stage and prod are independent applies:
+
+   ```bash
+   cd aws/accounts/stage/ap-southeast-1/ses && terragrunt apply
+   cd ../../../prod/ap-southeast-1/ses     && terragrunt apply
+   ```
+
+   Verify creds landed (repeat with `prod`):
+
+   ```bash
+   aws ssm get-parameters-by-path --path "/reservation/stage/ses" \
+     --profile reservation-stage --region ap-southeast-1 \
+     --query "Parameters[].Name" --output table
+   ```
+
+2. **Request production access (account-wide, run ONCE).** No Terraform resource exists for this —
+   the AWS provider doesn't expose it. Use the API (or the SES console → Account dashboard →
+   *Request production access*). **Run it against the deploy account** — `--profile reservation-stage`,
+   not your default CLI creds:
+
+   ```bash
+   aws sesv2 put-account-details \
+     --profile reservation-stage \
+     --region ap-southeast-1 \
+     --mail-type TRANSACTIONAL \
+     --website-url "https://bookme.ph" \
+     --use-case-description "Transactional email for a service-reservation platform: signup OTP verification, password resets, and booking confirmation/reminder emails to opted-in registered users. Bounces and complaints handled via the SES account-level suppression list." \
+     --additional-contact-email-addresses "yulgurz@gmail.com" \
+     --production-access-enabled
+   ```
+
+   A `ConflictException` on this call means a request **already exists / is under review** — it is
+   not an error to fix; you cannot resubmit while one is open. Just wait.
+
+3. **Poll until approved** (~24–48h; AWS may email `yulgurz@gmail.com` for more info):
+
+   ```bash
+   aws sesv2 get-account --profile reservation-stage --region ap-southeast-1 \
+     --query '{Prod:ProductionAccessEnabled, Max24h:SendQuota.Max24HourSend, Rate:SendQuota.MaxSendRate}' \
+     --output table
+   ```
+
+   Live when `Prod: True` and the quota rises above `200 / 1`.
+
+4. **Tighten DMARC** (optional, after prod access + confirming real sends are DKIM-aligned). The
+   `dns` layer now publishes `p=quarantine`; bump to `p=reject` in
+   [aws/layers/dns/main.tf](../aws/layers/dns/main.tf) when ready, then re-apply the stage `dns` dir.
+
+**Account gotcha.** Terragrunt assumes a role into the deploy account (`936146782254`) via the
+`reservation-stage` profile. A bare `aws …` command uses your *default* credentials, which may be a
+different account — every SES/SSM/IAM check above must pass `--profile reservation-stage` or it will
+silently report an unrelated account as empty.
 
 **Apply order matters.** `ses` must apply before `ecs` (or before any `ecs` re-apply) — the ECS
 task's `secrets` block references the `/ses/*` SSM paths and will fail to start if they don't
@@ -429,7 +503,7 @@ exist. See README "SES (transactional email) setup".
 
 ### `dns`
 
-**Creates** — ONE public Route 53 hosted zone for the registered domain `bookme.ph` (bought at [dot.ph](https://www.dot.ph)).
+**Creates** — ONE public Route 53 hosted zone for the registered domain `bookme.ph` (bought at [dot.ph](https://www.dot.ph)), plus the **account-wide SES domain identity** (`bookme.ph`), its 3 DKIM CNAMEs, and a baseline DMARC TXT.
 
 Single-account model, so a single zone serves every environment; each env's `frontend_hosting` layer writes its own ACM-validation + alias records into it:
 
@@ -443,6 +517,59 @@ The zone lives under **stage** (`accounts/stage/ap-southeast-1/dns/`) — the li
 **The one manual step:** after applying this layer, read its `name_servers` output (4 entries) and paste them into the dot.ph dashboard → **Manage → bookme.ph → Nameservers**, replacing dot.ph's defaults. dot.ph remains the *registrar*; Route 53 becomes the *DNS host*. Propagation is minutes to a few hours; ACM DNS validation then completes on its own.
 
 **Apply order:** `dns` → (dot.ph nameserver change) → `frontend_hosting`. `frontend_hosting` reads `dns`'s `zone_id` via a terragrunt dependency, so the zone must exist first. Before `dns` is applied, `frontend_hosting` plans/applies fine with the default `*.cloudfront.net` cert (the dependency mocks `zone_id = ""`, which disables the custom-domain block).
+
+**SES domain identity + DKIM + DMARC.** This layer owns the `aws_sesv2_email_identity` for `bookme.ph` and the 4 records that prove ownership and sign outbound mail:
+
+| Record | Purpose |
+|---|---|
+| 3 × `<token>._domainkey.bookme.ph` CNAME → `<token>.dkim.amazonses.com` | DKIM signing keys; SES marks the identity Verified once these resolve |
+| `_dmarc.bookme.ph` TXT → `v=DMARC1; p=quarantine;` | DMARC enforcement; unauthenticated mail claiming `@bookme.ph` is sent to spam. Tighten to `p=reject` once you've confirmed over time no legitimate 3rd-party sends as `@bookme.ph` |
+
+Why here and not in `ses`: SES allows one identity per (account, domain), and stage + prod share the same account. Owning it in the (also stage-only) `dns` layer makes it shared by construction and keeps the records co-located with the hosted zone that holds them. Each env's `ses` layer still creates its own per-env IAM user + SMTP creds and sends *as* this shared identity.
+
+**Importing an identity created in the SES console.** If the SES console was used to add `bookme.ph` before Terraform owned it, import the existing identity into state before the first apply (otherwise Terraform errors on "already exists"). DKIM tokens are preserved by the import — no DNS gap:
+
+```bash
+cd aws/accounts/stage/ap-southeast-1/dns
+terragrunt import aws_sesv2_email_identity.root_domain bookme.ph
+terragrunt plan    # only the 3 DKIM CNAMEs + 1 DMARC TXT should appear as creates
+terragrunt apply
+```
+
+After apply, SES DKIM status transitions PENDING → SUCCESSFUL within minutes-to-an-hour as Route 53 propagates and SES re-checks. Verify with:
+
+```bash
+aws --profile reservation-stage sesv2 get-email-identity \
+  --email-identity bookme.ph \
+  --query 'DkimAttributes.Status'
+```
+
+DKIM verification is independent of SES sandbox — you still need a separate AWS support ticket ("Request production access" in the SES console) to send to non-verified recipients. AWS reviewers expect DKIM Successful before approving.
+
+**Resend (alternative email provider).** The backend can also send via [Resend](https://resend.com) instead of SES — it's a drop-in `EMAIL_BACKEND` swap (via [django-anymail](https://anymail.dev)) that additionally delivers bounce/complaint webhooks. Both providers can be DNS-verified on `bookme.ph` at once; they don't conflict (Resend's SPF/MX sit on the `send.*` MAIL FROM subdomain, its DKIM uses the `resend` selector, and `_dmarc` is shared). To wire it:
+
+1. Add the domain at [resend.com/domains](https://resend.com/domains); it shows an MX, an SPF TXT, and a DKIM TXT.
+2. Paste those into `resend_verify_records` in [accounts/global.hcl](accounts/global.hcl) (account-global, like the SES identity — see the commented example), then `cd accounts/stage/ap-southeast-1/dns && terragrunt apply`. The `resend_record_names` output lists what's managed.
+3. Add a webhook in Resend (events `email.bounced`, `email.complained`) pointing at `https://<host>/api/email/webhooks/resend/tracking/`; copy its **Signing Secret**.
+4. Set the two secrets (created as SecureString placeholders by the `parameters` layer, already wired into the ECS task in `region.hcl`):
+   ```bash
+   aws --profile reservation-stage ssm put-parameter --overwrite \
+     --name /reservation/stage/RESEND_API_KEY --type SecureString --value 're_...'
+   aws --profile reservation-stage ssm put-parameter --overwrite \
+     --name /reservation/stage/RESEND_SIGNING_SECRET --type SecureString --value 'whsec_...'
+   ```
+5. Flip the provider (value-only — no task-def change) and restart the service:
+   ```bash
+   aws --profile reservation-stage ssm put-parameter --overwrite \
+     --name /reservation/stage/ses/email_backend --type String \
+     --value anymail.backends.resend.EmailBackend
+   aws --profile reservation-stage ssm put-parameter --overwrite \
+     --name /reservation/stage/ses/default_from_email --type String \
+     --value 'BookMe <noreply@bookme.ph>'
+   aws --profile reservation-stage ecs update-service --force-new-deployment \
+     --cluster ecs-reservation-stage --service svc-ecs-reservation-stage-api
+   ```
+   Revert by setting `email_backend` back to `django.core.mail.backends.smtp.EmailBackend`. App-side details (the `tracking`-signal handler and `User.email_bounced` suppression) are in the main [README](../README.md) Email section.
 
 ### `frontend_hosting`
 
