@@ -22,6 +22,11 @@ class User(AbstractUser):
 
     last_seen_at = models.DateTimeField(null=True, blank=True)
 
+    # Set when the email provider reports a hard bounce or spam complaint for
+    # this address (see apps.core.email_events). Suppressed in send_template_email
+    # so we stop mailing dead/complaining addresses and protect sender reputation.
+    email_bounced = models.BooleanField(default=False)
+
     USERNAME_FIELD = "email"
     REQUIRED_FIELDS = ["username"]
 

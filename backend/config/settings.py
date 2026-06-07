@@ -35,6 +35,7 @@ INSTALLED_APPS = [
     "django_filters",
     "drf_spectacular",
     "channels",
+    "anymail",
 
     "apps.accounts",
     "apps.shops",
@@ -263,6 +264,16 @@ EMAIL_HOST_USER = env("EMAIL_HOST_USER", default="")
 EMAIL_HOST_PASSWORD = env("EMAIL_HOST_PASSWORD", default="")
 EMAIL_USE_TLS = env.bool("EMAIL_USE_TLS", default=True)
 DEFAULT_FROM_EMAIL = env("DEFAULT_FROM_EMAIL", default="BookMe <noreply@bookme.local>")
+
+# Anymail / Resend. Inert unless EMAIL_BACKEND is switched to
+# "anymail.backends.resend.EmailBackend" — SES SMTP stays the documented
+# alternative (see backend/.env.example). The signing secret lets Anymail's
+# webhook view verify Resend's Svix-signed delivery/bounce events; without it
+# the webhook rejects everything, so it's required wherever the webhook is live.
+ANYMAIL = {
+    "RESEND_API_KEY": env("RESEND_API_KEY", default=""),
+    "RESEND_SIGNING_SECRET": env("RESEND_SIGNING_SECRET", default=""),
+}
 
 LOGGING = {
     "version": 1,
