@@ -546,6 +546,31 @@ aws --profile reservation-stage sesv2 get-email-identity \
 
 DKIM verification is independent of SES sandbox — you still need a separate AWS support ticket ("Request production access" in the SES console) to send to non-verified recipients. AWS reviewers expect DKIM Successful before approving.
 
+**Resend (alternative email provider).** The backend can also send via [Resend](https://resend.com) instead of SES — it's a drop-in `EMAIL_BACKEND` swap (via [django-anymail](https://anymail.dev)) that additionally delivers bounce/complaint webhooks. Both providers can be DNS-verified on `bookme.ph` at once; they don't conflict (Resend's SPF/MX sit on the `send.*` MAIL FROM subdomain, its DKIM uses the `resend` selector, and `_dmarc` is shared). To wire it:
+
+1. Add the domain at [resend.com/domains](https://resend.com/domains); it shows an MX, an SPF TXT, and a DKIM TXT.
+2. Paste those into `resend_verify_records` in [accounts/global.hcl](accounts/global.hcl) (account-global, like the SES identity — see the commented example), then `cd accounts/stage/ap-southeast-1/dns && terragrunt apply`. The `resend_record_names` output lists what's managed.
+3. Add a webhook in Resend (events `email.bounced`, `email.complained`) pointing at `https://<host>/api/email/webhooks/resend/tracking/`; copy its **Signing Secret**.
+4. Set the two secrets (created as SecureString placeholders by the `parameters` layer, already wired into the ECS task in `region.hcl`):
+   ```bash
+   aws --profile reservation-stage ssm put-parameter --overwrite \
+     --name /reservation/stage/RESEND_API_KEY --type SecureString --value 're_...'
+   aws --profile reservation-stage ssm put-parameter --overwrite \
+     --name /reservation/stage/RESEND_SIGNING_SECRET --type SecureString --value 'whsec_...'
+   ```
+5. Flip the provider (value-only — no task-def change) and restart the service:
+   ```bash
+   aws --profile reservation-stage ssm put-parameter --overwrite \
+     --name /reservation/stage/ses/email_backend --type String \
+     --value anymail.backends.resend.EmailBackend
+   aws --profile reservation-stage ssm put-parameter --overwrite \
+     --name /reservation/stage/ses/default_from_email --type String \
+     --value 'BookMe <noreply@bookme.ph>'
+   aws --profile reservation-stage ecs update-service --force-new-deployment \
+     --cluster ecs-reservation-stage --service svc-ecs-reservation-stage-api
+   ```
+   Revert by setting `email_backend` back to `django.core.mail.backends.smtp.EmailBackend`. App-side details (the `tracking`-signal handler and `User.email_bounced` suppression) are in the main [README](../README.md) Email section.
+
 ### `frontend_hosting`
 
 **Creates** — S3 bucket (private, OAC-locked) + CloudFront distribution + GitHub OIDC provider + per-env deploy IAM role. When `frontend_domains` is set **and** the `dns` zone id is available, it also creates a us-east-1 ACM cert (DNS-validated) and apex/subdomain alias A+AAAA records.

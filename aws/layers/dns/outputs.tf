@@ -21,3 +21,8 @@ output "ses_domain_identity_name" {
   description = "Email identity name (the bare domain). Use as the value of SES SendingAuthorizationIdentity if you ever scope per-env policies."
   value       = aws_sesv2_email_identity.root_domain.email_identity
 }
+
+output "resend_record_names" {
+  description = "Resend verification records currently managed in the zone (empty until resend_verify_records is set in global.hcl). Cross-check against the Resend dashboard's 'Verified' status."
+  value       = [for r in aws_route53_record.resend : r.fqdn]
+}

@@ -63,3 +63,29 @@ resource "aws_route53_record" "ses_dmarc" {
   ttl     = 600
   records = ["v=DMARC1; p=quarantine;"]
 }
+
+# ---------------------------------------------------------------------------
+# Resend email-sending DNS for bookme.ph (https://resend.com/domains).
+#
+# Optional, additive, and off by default: nothing is created until you paste the
+# dashboard's records into `resend_verify_records` (in global.hcl). They coexist
+# with the SES records above without conflict — Resend's SPF/MX live on the
+# `send.*` MAIL FROM subdomain (not the apex), Resend's DKIM uses the `resend`
+# selector (SES uses its own token selectors), and the `_dmarc` record is shared.
+#
+# MX values in Route 53 carry the priority inline ("10 host"), so we prepend it
+# for type=MX; TXT/CNAME pass through as-is.
+# ---------------------------------------------------------------------------
+resource "aws_route53_record" "resend" {
+  for_each = { for r in var.resend_verify_records : "${r.type}:${r.name}" => r }
+
+  zone_id = aws_route53_zone.root.zone_id
+  name    = each.value.name
+  type    = each.value.type
+  ttl     = each.value.ttl
+  records = [
+    each.value.type == "MX" && each.value.priority != null
+    ? "${each.value.priority} ${each.value.value}"
+    : each.value.value
+  ]
+}
