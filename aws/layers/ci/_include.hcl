@@ -25,6 +25,6 @@ inputs = {
     ]
   ])
 
-  state_bucket = "terraform-states-${local.account_vars.account_id}-${local.region_vars.aws_region}"
+  state_bucket    = "terraform-states-${local.account_vars.account_id}-${local.region_vars.aws_region}"
   ecr_arn_pattern = "arn:aws:ecr:${local.region_vars.aws_region}:${local.account_vars.account_id}:repository/${local.region_vars.project_name}/${local.region_vars.env}/*"
 }

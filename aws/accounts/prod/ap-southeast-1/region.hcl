@@ -293,11 +293,11 @@ locals {
   db_allowed_cidrs        = []
 
   rds_settings = {
-    name                                  = "rds-${local.project_name}-${local.env}"
-    engine                                = "postgres"
-    engine_version                        = "17.4"
-    family                                = "postgres17"
-    major_engine_version                  = "17"
+    name                 = "rds-${local.project_name}-${local.env}"
+    engine               = "postgres"
+    engine_version       = "17.4"
+    family               = "postgres17"
+    major_engine_version = "17"
     # Minimum prod-grade: db.t4g.small (2 vCPU burst, 2 GB RAM) + Multi-AZ.
     # Multi-AZ doubles cost (~$26/mo) but gives sub-60s failover.
     instance_class                        = "db.t4g.small"
@@ -319,8 +319,8 @@ locals {
     # Prod safety: deletion_protection prevents accidental drops. To destroy
     # this RDS, you MUST first set deletion_protection = false and apply once,
     # THEN run destroy. Two-step gate is intentional.
-    deletion_protection                   = true
-    storage_encrypted                     = true
+    deletion_protection = true
+    storage_encrypted   = true
   }
 
   # ---------------------------------------------------------------------------
@@ -328,13 +328,13 @@ locals {
   # ---------------------------------------------------------------------------
   create_redis = true
   redis_settings = {
-    name                       = "redis-${local.project_name}-${local.env}"
-    engine                     = "redis"
-    engine_version             = "7.1"
+    name           = "redis-${local.project_name}-${local.env}"
+    engine         = "redis"
+    engine_version = "7.1"
     # cache.t3.small (2 vCPU burst, 1.55 GB RAM) — smallest size that still
     # supports automatic_failover_enabled.
-    node_type                  = "cache.t3.small"
-    cluster_mode_enabled       = false
+    node_type            = "cache.t3.small"
+    cluster_mode_enabled = false
     # Two nodes (primary + replica) = automatic failover. Stage runs 1 node;
     # prod runs 2 across AZs so a single-AZ outage doesn't kill Channels/Celery.
     num_cache_clusters         = 2
